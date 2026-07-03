@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # pipeline.yaml — TOF phase DAG, artifact schema, transition rules, approval policy
 # Single source of truth. tof validate reads this file only.
 # DO NOT add next_allowed or transition logic to artifact frontmatter.
@@ -53,16 +54,40 @@ phases:
       - rollback
       - out_of_scope
       - execution_mode
+=======
+version: "0.1"
+
+phases:
+  establish:
+    artifact: PLAN.md
+    inputs: {}
+    required_fields:
+      - plan.architecture
+      - plan.steps
+      - plan.verification_functions
+      - plan.rollback
+      - plan.out_of_scope
+      - plan.execution_mode
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     verdict_field: plan.verdict
     verdicts:
       READY:
         next: review
       NEEDS_USER:
         next: pause
+<<<<<<< HEAD
     approval_policy: on_designer_assumption
 
   review:
     artifact: REVIEW.md
+=======
+
+  review:
+    artifact: REVIEW.md
+    inputs:
+      required:
+        - establish
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     required_fields:
       - review.verdict
       - review.findings
@@ -72,7 +97,11 @@ phases:
       family_must_differ_from: establish
     verdicts:
       PASS:
+<<<<<<< HEAD
         next: implement
+=======
+        next: null
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
       WEAKNESS_FOUND:
         next: establish
       BLOCKING:
@@ -80,6 +109,7 @@ phases:
         retry:
           max_rounds: 2
           exhausted: escalation
+<<<<<<< HEAD
 
   implement:
     artifact: IMPLEMENTATION_LOG.md
@@ -129,3 +159,5 @@ phases:
       SKIPPED:
         next: null
     approval_policy: never_if_schema_valid
+=======
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # pipeline.yaml — TOF phase DAG, artifact schema, transition rules, approval policy
 # Single source of truth. tof validate reads this file only.
 # DO NOT add next_allowed or transition logic to artifact frontmatter.
@@ -31,11 +32,32 @@ phases:
       - implicit_dependencies
     field_rules:
       unknowns:
+=======
+version: "0.1"
+
+phases:
+  scout:
+    artifact: RESEARCH.md
+    inputs: {}
+    required_fields:
+      - scout.affected_files
+      - scout.dependency_graph
+      - scout.verification_functions
+      - scout.risk_areas
+      - scout.unknowns
+      - scout.implicit_dependencies
+    field_rules:
+      scout.unknowns:
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
         min_items: 1
     verdict_field: scout.verdict
     verdicts:
       PASS:
+<<<<<<< HEAD
         next: establish
+=======
+        next: null
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
       EXPLORE:
         next: exploration
       FAIL:
@@ -43,6 +65,7 @@ phases:
         retry:
           max_rounds: 2
           exhausted: escalation
+<<<<<<< HEAD
 
   establish:
     artifact: PLAN.md
@@ -129,3 +152,5 @@ phases:
       SKIPPED:
         next: null
     approval_policy: never_if_schema_valid
+=======
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)

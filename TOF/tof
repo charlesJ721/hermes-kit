@@ -65,6 +65,10 @@ def load_yaml_file(path: Path) -> Dict[str, Any]:
 def candidate_config_paths(run_dir: Optional[Path], filename: str) -> List[Path]:
     paths: List[Path] = []
     if run_dir is not None:
+<<<<<<< HEAD
+=======
+        paths.append((run_dir / filename).resolve())
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
         paths.append((run_dir / ".." / filename).resolve())
     paths.append((Path.cwd() / filename).resolve())
     tof_dir = os.environ.get("TOF_DIR")
@@ -357,6 +361,7 @@ def derive_transition(
     return "PASS", [next_value]
 
 
+<<<<<<< HEAD
 def validate_input_linkage(art: Artifact, latest_by_phase: Dict[str, Artifact], reasons: List[str]) -> str:
     tof = art.frontmatter.get("tof", {})
     inputs = tof.get("inputs", []) if isinstance(tof, dict) else []
@@ -368,11 +373,39 @@ def validate_input_linkage(art: Artifact, latest_by_phase: Dict[str, Artifact], 
 
     ok = True
     for idx, inp in enumerate(inputs):
+=======
+def validate_input_linkage(
+    art: Artifact,
+    phase_cfg: Dict[str, Any],
+    grouped: Dict[str, List[Artifact]],
+    latest_by_phase: Dict[str, Artifact],
+    reasons: List[str],
+) -> str:
+    del grouped  # Reserved for future policies that need all upstream rounds.
+    inputs_cfg = phase_cfg.get("inputs", {})
+    if inputs_cfg in (None, {}):
+        inputs_cfg = {}
+    if not isinstance(inputs_cfg, dict):
+        return "PASS"
+
+    ok = True
+    fm_tof = art.frontmatter.get("tof", {})
+    fm_inputs = fm_tof.get("inputs", []) if isinstance(fm_tof, dict) else []
+    if fm_inputs in (None, []):
+        fm_inputs = []
+    if not isinstance(fm_inputs, list):
+        reasons.append("tof.inputs must be a list")
+        return "BLOCKING"
+
+    input_by_phase: Dict[str, Dict[str, Any]] = {}
+    for idx, inp in enumerate(fm_inputs):
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
         if not isinstance(inp, dict):
             ok = False
             reasons.append(f"tof.inputs[{idx}] must be a mapping")
             continue
         phase = inp.get("phase")
+<<<<<<< HEAD
         declared = inp.get("sha256")
         if not phase or not declared:
             ok = False
@@ -387,6 +420,64 @@ def validate_input_linkage(art: Artifact, latest_by_phase: Dict[str, Artifact], 
         if str(declared) != actual:
             ok = False
             reasons.append(f"input linkage sha256 mismatch for phase={phase}: declared={declared} actual={actual}")
+=======
+        if phase:
+            input_by_phase[str(phase)] = inp
+
+    def verify_declared(req_phase: str, missing_reason: str, path_missing_prefix: str) -> None:
+        nonlocal ok
+        if req_phase not in input_by_phase:
+            ok = False
+            reasons.append(missing_reason)
+            return
+        inp = input_by_phase[req_phase]
+        declared = inp.get("sha256")
+        if not declared:
+            ok = False
+            reasons.append(f"input linkage for {req_phase}: missing sha256")
+            return
+
+        if inp.get("path"):
+            target_path = art.path.parent / str(inp["path"])
+            if target_path.exists():
+                actual = file_sha256(target_path)
+            else:
+                ok = False
+                reasons.append(f"input linkage for {req_phase}: {path_missing_prefix}: {inp['path']}")
+                return
+        else:
+            target = latest_by_phase.get(req_phase)
+            if target is None:
+                ok = False
+                reasons.append(f"input linkage artifact not found for phase={req_phase}")
+                return
+            actual = target.sha256
+
+        if str(declared) != actual:
+            ok = False
+            reasons.append(
+                f"input linkage sha256 mismatch for phase={req_phase}: "
+                f"declared={str(declared)[:16]}... actual={actual[:16]}..."
+            )
+
+    for req_phase in inputs_cfg.get("required", []) or []:
+        verify_declared(
+            str(req_phase),
+            f"input linkage missing required upstream: {req_phase}",
+            "declared path not found",
+        )
+
+    for req_if_phase in inputs_cfg.get("required_if_present", []) or []:
+        req_if_phase = str(req_if_phase)
+        if req_if_phase not in latest_by_phase:
+            continue
+        verify_declared(
+            req_if_phase,
+            f"input linkage: phase={req_if_phase} exists but not referenced (required_if_present)",
+            "path not found",
+        )
+
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     return "PASS" if ok else "BLOCKING"
 
 
@@ -446,6 +537,7 @@ def validate_retry_budget(
     except (TypeError, ValueError):
         return "BLOCKING", next_allowed
     count = len(grouped.get(art.phase, []))
+<<<<<<< HEAD
     if count > max_rounds:
         exhausted = retry.get("exhausted")
         reasons.append(f"retry budget exceeded: count={count} > max_rounds={max_rounds}; next_allowed={exhausted}")
@@ -454,6 +546,16 @@ def validate_retry_budget(
 
 
 def validate_run(run_dir: Path) -> int:
+=======
+    if count >= max_rounds:
+        exhausted = retry.get("exhausted")
+        reasons.append(f"retry budget exhausted: count={count} >= max_rounds={max_rounds}; next_allowed={exhausted}")
+        return "PASS", ([] if exhausted is None else [exhausted])
+    return "PASS", next_allowed
+
+
+def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     pipeline_path = locate_config(run_dir, "pipeline.yaml")
     models_path = locate_config(run_dir, "models.yaml")
     pipeline = load_yaml_file(pipeline_path)
@@ -500,19 +602,31 @@ def validate_run(run_dir: Path) -> int:
         reasons.append(f"ignored artifact-declared {p}; transition derived from pipeline.yaml")
 
     checks["schema"] = validate_schema(current_art, phase_cfg, reasons)
+<<<<<<< HEAD
     checks["transition"], next_allowed = derive_transition(current_art, phase_cfg, grouped, reasons)
     checks["input_linkage"] = validate_input_linkage(current_art, latest_by_phase, reasons)
     checks["model_policy"] = validate_model_policy(current_art, phase_cfg, latest_by_phase, models, reasons)
     checks["retry_budget"], next_allowed = validate_retry_budget(current_art, phase_cfg, grouped, next_allowed, reasons)
+=======
+    checks["input_linkage"] = validate_input_linkage(current_art, phase_cfg, grouped, latest_by_phase, reasons)
+    checks["model_policy"] = validate_model_policy(current_art, phase_cfg, latest_by_phase, models, reasons)
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
 
     try:
         verdict = str(get_path(current_art.frontmatter, str(phase_cfg.get("verdict_field"))))
     except KeyError:
         verdict = None  # type: ignore[assignment]
 
+<<<<<<< HEAD
     any_blocking = any(v in {"FAIL", "BLOCKING"} for v in checks.values())
     if any_blocking:
         status = "BLOCKING"
+=======
+    any_check_blocking = any(v in {"FAIL", "BLOCKING"} for v in checks.values())
+
+    if any_check_blocking:
+        status = "INVALID"
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     elif verdict in {"BLOCKING", "FAIL"}:
         status = "BLOCKING"
     elif verdict in PASSISH_VERDICTS:
@@ -520,6 +634,15 @@ def validate_run(run_dir: Path) -> int:
     else:
         status = verdict or "UNKNOWN"
 
+<<<<<<< HEAD
+=======
+    if status == "INVALID":
+        next_allowed: List[Any] = []
+    else:
+        checks["transition"], next_allowed = derive_transition(current_art, phase_cfg, grouped, reasons)
+        checks["retry_budget"], next_allowed = validate_retry_budget(current_art, phase_cfg, grouped, next_allowed, reasons)
+
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     receipt = {
         "validation": {
             "id": validation_id(),
@@ -532,8 +655,22 @@ def validate_run(run_dir: Path) -> int:
             "checks": checks,
         }
     }
+<<<<<<< HEAD
     print(json.dumps(receipt, indent=2))
     return 1 if any_blocking else 0
+=======
+    if status == "INVALID":
+        receipt["validation"]["required_action"] = "rerun_current_phase"
+    print(json.dumps(receipt, indent=2))
+
+    if fail_on == "invalid" and status == "INVALID":
+        return 1
+    if fail_on == "blocking" and status in {"INVALID", "BLOCKING"}:
+        return 1
+    if fail_on == "nonpass" and status != "PASS":
+        return 1
+    return 0
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
 
 
 def dotted_path_is_valid(path: Any) -> bool:
@@ -581,6 +718,24 @@ def lint_pipeline() -> int:
         if not dotted_path_is_valid(verdict_field):
             errors.append(f"phase {name}: invalid verdict_field {verdict_field!r}")
 
+<<<<<<< HEAD
+=======
+        inputs_cfg = cfg.get("inputs", {})
+        if isinstance(inputs_cfg, dict):
+            for group_key in ["required", "required_if_present"]:
+                group = inputs_cfg.get(group_key, []) or []
+                if not isinstance(group, list):
+                    errors.append(f"phase {name}: inputs.{group_key} must be a list")
+                    continue
+                for ref_phase in group:
+                    if ref_phase not in phase_names:
+                        errors.append(f"phase {name}: inputs.{group_key} references non-existent phase: {ref_phase}")
+                    else:
+                        referenced.add(ref_phase)
+        else:
+            errors.append(f"phase {name}: inputs must be a mapping")
+
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
         model_policy = cfg.get("model_policy") or {}
         if isinstance(model_policy, dict):
             other = model_policy.get("family_must_differ_from")
@@ -596,7 +751,11 @@ def lint_pipeline() -> int:
                 warnings.append(f"phase {name}: approval_policy never_if_schema_valid on non-terminal phase")
 
     deposition = dict(phases).get("deposition")
+<<<<<<< HEAD
     if not isinstance(deposition, dict) or deposition.get("optional") is not True:
+=======
+    if deposition is not None and (not isinstance(deposition, dict) or deposition.get("optional") is not True):
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
         errors.append("deposition must be marked optional: true")
 
     for name, cfg in phases:
@@ -620,11 +779,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p_validate = sub.add_parser("validate", help="validate the latest TOF artifact in a run directory")
     p_validate.add_argument("run_dir", help="TOF run directory containing markdown artifacts")
+<<<<<<< HEAD
+=======
+    p_validate.add_argument("--fail-on", choices=["invalid", "blocking", "nonpass"], default=None)
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     sub.add_parser("lint-pipeline", help="check pipeline.yaml internal consistency")
     args = parser.parse_args(argv)
 
     if args.command == "validate":
+<<<<<<< HEAD
         return validate_run(Path(args.run_dir).resolve())
+=======
+        return validate_run(Path(args.run_dir).resolve(), args.fail_on)
+>>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     if args.command == "lint-pipeline":
         return lint_pipeline()
     parser.error("unknown command")
