@@ -866,11 +866,15 @@ def resolve_current_attempt(phase_names: List[str], phase_cfgs: Dict[str, Any],
 # Main validation
 # ---------------------------------------------------------------------------
 
-def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
-    pipeline_path = locate_config(run_dir, "pipeline.yaml")
-    models_path = locate_config(run_dir, "models.yaml")
+def validate_run(run_dir: Path, fail_on: Optional[str] = None,
+                override_pipeline: Optional[Path] = None,
+                override_models: Optional[Path] = None) -> int:
+    pipeline_path = override_pipeline or locate_config(run_dir, "pipeline.yaml")
+    models_path = override_models or locate_config(run_dir, "models.yaml")
     pipeline = load_yaml_file(pipeline_path)
+    pipeline_sha = file_sha256(pipeline_path)
     models_yaml = load_yaml_file(models_path)
+    models_sha = file_sha256(models_path)
     models = load_model_registry(models_yaml)
     phases = phase_items(pipeline)
     phase_names = [name for name, _ in phases]
@@ -889,6 +893,10 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
                 "next_allowed": [first],
                 "reasons": ["no TOF artifacts found"],
                 "checks": {},
+                "config": {
+                    "pipeline": {"path": str(pipeline_path), "sha256": pipeline_sha},
+                    "models": {"path": str(models_path), "sha256": models_sha},
+                },
             }
         }
         print(json.dumps(receipt, indent=2))
@@ -956,6 +964,10 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
             "phase": frontier_art.phase,
             "status": frontier_status,
         }
+    receipt["validation"]["config"] = {
+        "pipeline": {"path": str(pipeline_path), "sha256": pipeline_sha},
+        "models": {"path": str(models_path), "sha256": models_sha},
+    }
 
     print(json.dumps(receipt, indent=2))
 
@@ -976,8 +988,8 @@ def dotted_path_is_valid(path: Any) -> bool:
     return isinstance(path, str) and bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$", path))
 
 
-def lint_pipeline() -> int:
-    pipeline_path = locate_config(None, "pipeline.yaml")
+def lint_pipeline(override_pipeline: Optional[Path] = None) -> int:
+    pipeline_path = override_pipeline or locate_config(None, "pipeline.yaml")
     pipeline = load_yaml_file(pipeline_path)
     phases = phase_items(pipeline)
     phase_names_set = {name for name, _ in phases}
@@ -1077,15 +1089,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_validate = sub.add_parser("validate", help="validate the latest TOF artifact in a run directory")
     p_validate.add_argument("run_dir", help="TOF run directory containing markdown artifacts")
     p_validate.add_argument("--fail-on", choices=["invalid", "blocking", "nonpass"], default=None)
+    p_validate.add_argument("--pipeline", type=Path, default=None, help="explicit pipeline.yaml path")
+    p_validate.add_argument("--models", type=Path, default=None, help="explicit models.yaml path")
 
-    sub.add_parser("lint-pipeline", help="check pipeline.yaml internal consistency")
+    p_lint = sub.add_parser("lint-pipeline", help="check pipeline.yaml internal consistency")
+    p_lint.add_argument("--pipeline", type=Path, default=None, help="explicit pipeline.yaml path")
 
     args = parser.parse_args(argv)
 
     if args.command == "validate":
-        return validate_run(Path(args.run_dir).resolve(), fail_on=args.fail_on)
+        return validate_run(Path(args.run_dir).resolve(), fail_on=args.fail_on,
+                           override_pipeline=args.pipeline,
+                           override_models=args.models)
     if args.command == "lint-pipeline":
-        return lint_pipeline()
+        return lint_pipeline(override_pipeline=args.pipeline)
     parser.error("unknown command")
     return 2
 
