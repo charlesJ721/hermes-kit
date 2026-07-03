@@ -7,10 +7,7 @@ version: "0.1"
 phases:
   clarify:
     artifact: TASK.md
-<<<<<<< HEAD
-=======
     inputs: {}
->>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     required_fields:
       - task.scope
       - task.success_criteria
@@ -26,12 +23,9 @@ phases:
 
   scout:
     artifact: RESEARCH.md
-<<<<<<< HEAD
-=======
     inputs:
       required:
         - clarify
->>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     required_fields:
       - scout.affected_files
       - scout.dependency_graph
@@ -56,15 +50,12 @@ phases:
 
   establish:
     artifact: PLAN.md
-<<<<<<< HEAD
-=======
     inputs:
       required:
         - clarify
         - scout
       required_if_present:
         - review
->>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     required_fields:
       - establish.architecture
       - establish.steps
@@ -82,13 +73,10 @@ phases:
 
   review:
     artifact: REVIEW.md
-<<<<<<< HEAD
-=======
     inputs:
       required:
         - scout
         - establish
->>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     required_fields:
       - review.verdict
       - review.findings
@@ -109,13 +97,10 @@ phases:
 
   implement:
     artifact: IMPLEMENTATION_LOG.md
-<<<<<<< HEAD
-=======
     inputs:
       required:
         - establish
         - review
->>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     required_fields:
       - implement.diff_summary
       - implement.tests_run
@@ -133,15 +118,12 @@ phases:
 
   verify:
     artifact: VERIFICATION.md
-<<<<<<< HEAD
-=======
     inputs:
       required:
         - establish
         - implement
       required_if_present:
         - review
->>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     required_fields:
       - verify.verdict
       - verify.mismatches
@@ -159,12 +141,9 @@ phases:
   deposition:
     artifact: DEPOSITION_LOG.md
     optional: true
-<<<<<<< HEAD
-=======
     inputs:
       required:
         - verify
->>>>>>> ca51fc8 (TOF P0.1: three-state (PASS/BLOCKING/INVALID), inputs lineage, retry fix, --fail-on)
     required_fields:
       - deposition.channels
       - deposition.results
