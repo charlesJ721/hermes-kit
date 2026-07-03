@@ -752,6 +752,100 @@ def check_stale(current_art: Artifact, by_phase: Dict[str, List[Artifact]],
     return False, stale_reasons
 
 
+def apply_stale_to_all(artifacts: List[Artifact], by_phase: Dict[str, List[Artifact]],
+                       artifact_results: Dict[str, Any]) -> None:
+    """Run stale detection for all artifacts, writing results into artifact_results.
+    
+    STALE artifacts are marked INVALID in artifact_results — making them excluded
+    from causal_frontier naturally.
+    """
+    for art in artifacts:
+        if art.sha256 not in artifact_results:
+            continue
+        result = artifact_results[art.sha256]
+        # Only check artifacts that aren't already INVALID from other checks
+        if result.get("status") == "INVALID":
+            continue
+        is_stale, s_reasons = check_stale(art, by_phase, artifact_results)
+        if is_stale:
+            result["checks"]["stale"] = "BLOCKING"
+            result["status"] = "INVALID"
+            result["reasons"].extend(s_reasons)
+
+
+def resolve_current_attempt(phase_names: List[str], phase_cfgs: Dict[str, Any],
+                             latest_by_phase: Dict[str, Artifact],
+                             by_phase: Dict[str, List[Artifact]],
+                             artifact_results: Dict[str, Any]) -> Artifact:
+    """Select current attempt by following transition chains from DAG-latest artifact.
+    
+    If the DAG-latest artifact is valid and routes backward (e.g. Review BLOCKING →
+    establish), and the target phase has a newer valid artifact, switch to that
+    artifact. Also handles INVALID artifacts by checking what they were trying to
+    route to.
+    """
+    # Start from DAG-latest
+    current_art: Optional[Artifact] = None
+    for name in reversed(phase_names):
+        if name in latest_by_phase:
+            current_art = latest_by_phase[name]
+            break
+    assert current_art is not None
+
+    phase_index = {n: i for i, n in enumerate(phase_names)}
+    visited: set[str] = set()
+
+    for _ in range(len(phase_names) * 2):
+        if current_art.phase in visited:
+            break
+        visited.add(current_art.phase)
+
+        result = artifact_results.get(current_art.sha256, {})
+        status = result.get("status", "UNKNOWN")
+
+        if status != "INVALID":
+            # Valid artifact (PASS or BLOCKING) — this IS the current attempt.
+            # Do NOT backtrack from valid artifacts just because the verdict
+            # routes to a previous phase.
+            break
+
+        # INVALID artifact: try to find the real current attempt.
+        # Look at what it was trying to route to.
+        verdict = result.get("verdict")
+        if not verdict:
+            break
+        phase_cfg = phase_cfgs.get(current_art.phase, {})
+        verdicts = phase_cfg.get("verdicts", {})
+        rule = verdicts.get(verdict) if isinstance(verdicts, dict) else None
+
+        if not isinstance(rule, dict):
+            break
+
+        nxt = rule.get("next")
+        if not nxt or nxt not in phase_index or nxt not in latest_by_phase:
+            break
+
+        nxt_idx = phase_index.get(nxt, -1)
+        cur_idx = phase_index.get(current_art.phase, -1)
+
+        if nxt_idx >= cur_idx:
+            # Forward or same-phase — no earlier phase to backtrack to
+            break
+
+        # Backward transition: check if target phase has a valid artifact
+        target = latest_by_phase.get(nxt)
+        if target is None:
+            break
+        target_res = artifact_results.get(target.sha256, {})
+        if target_res.get("status") in ("INVALID", "UNKNOWN", None):
+            break
+
+        # Valid backtrack: switch to target artifact (e.g. stale Review → new Establish v2)
+        current_art = target
+
+    return current_art
+
+
 # ---------------------------------------------------------------------------
 # Main validation
 # ---------------------------------------------------------------------------
@@ -801,12 +895,11 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
             continue
         artifact_results[art.sha256] = compute_artifact_checks(art, phase_cfg, by_phase, latest_by_phase, models)
 
-    # Select current attempt (latest artifact by DAG phase order)
-    current_art: Optional[Artifact] = None
-    for name in phase_names:
-        if name in latest_by_phase:
-            current_art = latest_by_phase[name]
-    assert current_art is not None
+    # Apply stale detection to all artifacts (writes back into artifact_results)
+    apply_stale_to_all(artifacts, by_phase, artifact_results)
+
+    # Select current attempt via transition-aware resolution
+    current_art = resolve_current_attempt(phase_names, phase_cfgs, latest_by_phase, by_phase, artifact_results)
 
     # Get current artifact's results
     cur_result = artifact_results.get(current_art.sha256, {})
@@ -816,13 +909,6 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
     next_allowed = list(cur_result.get("next_allowed", []))
     reasons = list(cur_result.get("reasons", []))
 
-    # Stale detection
-    is_stale, stale_reasons = check_stale(current_art, by_phase, artifact_results)
-    if is_stale:
-        status = "INVALID"
-        checks["stale"] = "BLOCKING"
-        reasons.extend(stale_reasons)
-
     # INVALID → override transition
     if status == "INVALID":
         next_allowed = []
@@ -830,7 +916,7 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
     else:
         required_action = None
 
-    # Find causal frontier
+    # Find causal frontier (stale now in artifact_results, frontier correctly excludes stale)
     frontier_status, frontier_art = find_causal_frontier(phase_names, artifact_results, by_phase, latest_by_phase)
 
     # Build receipt
