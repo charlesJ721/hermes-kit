@@ -87,7 +87,9 @@ Mixed                           → Serial (A-SRE first, then SERI implementatio
 
 ## STATE_LOCKER Protocol
 
-For any L2/L3 task, every turn must begin with a state declaration:
+STATE_LOCKER is an **interactive UX protocol** for human-supervised workflows. It is NOT enforced by the P0 runtime validator — the `tof` tool does not parse or enforce STATE_LOCKER declarations. It remains useful for orchestrator self-discipline in interactive chat sessions.
+
+For multi-turn interactive use, every turn should begin with:
 
 ```
 [STATE_LOCKER]
@@ -98,18 +100,20 @@ For any L2/L3 task, every turn must begin with a state declaration:
 [/STATE_LOCKER]
 ```
 
-**Enforcement:** If the orchestrator outputs code blocks (```python/```shell/```sql) without a preceding STATE_LOCKER block on an L2/L3 task, the output is treated as a core dump — the task is rolled back to Phase 0.
+Future runtime hardening may add a pre-output interceptor or stream parser to enforce STATE_LOCKER. The P0 runtime does not include this capability.
 
 ## Quality Gates (Mandatory Fields)
 
-| Artifact | Required Fields | Missing → |
-|----------|----------------|-----------|
-| RESEARCH.md | `## affected_files`, `## unknowns` | BLOCKING |
-| PLAN.md | `## steps`, `## rollback`, `## out_of_scope`, `## execution_mode` | BLOCKING |
-| REVIEW.md | `review.verdict` (PASS/WEAKNESS_FOUND/BLOCKING) | BLOCKING |
-| VERIFICATION.md | `verify.verdict` (PASS/FAIL) | BLOCKING |
+Quality gates are enforced by `tof validate` through the `pipeline.yaml` schema. Each artifact must have the required fields in its YAML frontmatter (not Markdown headings).
 
-**`unknowns` must be non-empty.** An empty unknowns array means Scout failed — it doesn't know what it doesn't know. Honest unknowns are a sign of good scouting.
+| Artifact | Required Fields (frontmatter dotted paths) | Missing → |
+|----------|-------------------------------------------|-----------|
+| RESEARCH.md | `scout.affected_files`, `scout.unknowns` | INVALID |
+| PLAN.md | `establish.steps`, `establish.rollback`, `establish.out_of_scope`, `establish.execution_mode` | INVALID |
+| REVIEW.md | `review.verdict` (PASS/WEAKNESS_FOUND/BLOCKING) | INVALID |
+| VERIFICATION.md | `verify.verdict` (PASS/FAIL) | INVALID |
+
+**`unknowns` must be non-empty.** An empty unknowns array means Scout failed — it doesn't know what it doesn't know. Honest unknowns are a sign of good scouting. Enforced via `field_rules.scout.unknowns.min_items: 1` in pipeline.yaml.
 
 ## Orchestrator Behavior Boundaries
 

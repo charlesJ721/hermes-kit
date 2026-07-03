@@ -42,20 +42,20 @@
 
 **Output:** `RESEARCH.md`
 
-**Required fields:**
-```markdown
-## affected_files        — files that need to change
-## dependency_graph      — inter-file dependency DAG
-## verification_functions — verifiable checks for each step
-## risk_areas            — high-risk modules
-## unknowns              — things we don't know yet (MUST be non-empty)
-## implicit_dependencies — dependencies that aren't in the code
+**Required fields (frontmatter dotted paths):**
+```yaml
+scout.affected_files        — files that need to change
+scout.dependency_graph      — inter-file dependency DAG
+scout.verification_functions — verifiable checks for each step
+scout.risk_areas            — high-risk modules
+scout.unknowns              — things we don't know yet (MUST be non-empty)
+scout.implicit_dependencies — dependencies that aren't in the code
 ```
 
 **Quality gate:**
-- `affected_files` empty? → Scout FAILED, retry once
-- `unknowns` empty? → Scout FAILED (missed what it doesn't know)
-- `risk_areas` present? → continue; if absent → WEAKNESS_FOUND
+- `scout.affected_files` empty? → Scout FAILED, retry once
+- `scout.unknowns` empty or non-list, or `scout.unknowns.min_items=1` fails → INVALID
+- `scout.risk_areas` present? → continue; if absent → WEAKNESS_FOUND
 
 **Mode decision point (after Scout automatically):**
 
@@ -75,14 +75,14 @@ If `unknowns` ≥ 3 with keywords like "architectural assumption", "dependency u
 
 **Output:** `PLAN.md`
 
-**Required fields:**
-```markdown
-## architecture          — description of the approach
-## steps[]               — per step: file path + change description
-## verification_functions — executable verification checks
-## rollback              — rollback strategy
-## out_of_scope          — what is explicitly NOT being done now
-## execution_mode        — sync | async | split
+**Required fields (frontmatter dotted paths):**
+```yaml
+establish.architecture          — description of the approach
+establish.steps[]               — per step: file path + change description
+establish.verification_functions — executable verification checks
+establish.rollback              — rollback strategy
+establish.out_of_scope          — what is explicitly NOT being done now
+establish.execution_mode        — sync | async | split
 ```
 
 **`execution_mode` decides how Implement runs:**
@@ -190,11 +190,13 @@ verify.vf_results:
 
 ---
 
-## Phase 5.5: Knowledge Deposition
+## Phase 5.5: Knowledge Deposition (Optional)
 
-**Purpose:** After any methodology-level work (new patterns, bug workarounds, design decisions), ensure the knowledge is persisted where it can be found again.
+**Purpose:** After methodology-level work (new patterns, bug workarounds, design decisions), optionally persist the knowledge for future sessions.
 
-**Five channels to check:**
+**Status in P0 runtime:** Deposition is an **optional terminal phase** in `pipeline.yaml` (`deposition.optional: true`). It is NOT a correctness gate — a `VERIFY PASS` result means the primary task is complete regardless of deposition status. Channel failures are logged but do not block task completion.
+
+The five conceptual channels are:
 
 | Channel | Consumer | Verification |
 |---------|----------|-------------|
@@ -204,7 +206,7 @@ verify.vf_results:
 | Raw/Diary | Nightly archive | File in raw directory |
 | DT Hub / Public API | Semantic diff | Pushed and indexed |
 
-Any missing channel → block and report. If a channel isn't relevant, state the skip reason explicitly.
+Future versions may implement pluggable `KnowledgeDepositionAdapter` implementations. In the current runtime, deposition is a terminal phase that can be marked DONE, PARTIAL, or SKIPPED — all three exit normally.
 
 ---
 
