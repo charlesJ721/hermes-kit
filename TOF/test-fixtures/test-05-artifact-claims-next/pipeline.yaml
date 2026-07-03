@@ -1,0 +1,131 @@
+# pipeline.yaml — TOF phase DAG, artifact schema, transition rules, approval policy
+# Single source of truth. tof validate reads this file only.
+# DO NOT add next_allowed or transition logic to artifact frontmatter.
+
+version: "0.1"
+
+phases:
+  clarify:
+    artifact: TASK.md
+    required_fields:
+      - scope
+      - success_criteria
+      - explicit_exclusions
+      - constraints
+    verdict_field: task.verdict
+    verdicts:
+      READY:
+        next: scout
+      NEEDS_USER:
+        next: pause
+    approval_policy: always
+
+  scout:
+    artifact: RESEARCH.md
+    required_fields:
+      - affected_files
+      - dependency_graph
+      - verification_functions
+      - risk_areas
+      - unknowns
+      - implicit_dependencies
+    field_rules:
+      unknowns:
+        min_items: 1
+    verdict_field: scout.verdict
+    verdicts:
+      PASS:
+        next: establish
+      EXPLORE:
+        next: exploration
+      FAIL:
+        next: scout
+        retry:
+          max_rounds: 2
+          exhausted: escalation
+
+  establish:
+    artifact: PLAN.md
+    required_fields:
+      - architecture
+      - steps
+      - verification_functions
+      - rollback
+      - out_of_scope
+      - execution_mode
+    verdict_field: plan.verdict
+    verdicts:
+      READY:
+        next: review
+      NEEDS_USER:
+        next: pause
+    approval_policy: on_designer_assumption
+
+  review:
+    artifact: REVIEW.md
+    required_fields:
+      - review.verdict
+      - review.findings
+      - review.blocking
+    verdict_field: review.verdict
+    model_policy:
+      family_must_differ_from: establish
+    verdicts:
+      PASS:
+        next: implement
+      WEAKNESS_FOUND:
+        next: establish
+      BLOCKING:
+        next: establish
+        retry:
+          max_rounds: 2
+          exhausted: escalation
+
+  implement:
+    artifact: IMPLEMENTATION_LOG.md
+    required_fields:
+      - diff_summary
+      - tests_run
+      - test_results
+      - deviations_from_plan
+    verdict_field: implement.verdict
+    verdicts:
+      PASS:
+        next: verify
+      FAIL:
+        next: implement
+        retry:
+          max_rounds: 2
+          exhausted: escalation
+
+  verify:
+    artifact: VERIFICATION.md
+    required_fields:
+      - verify.verdict
+      - verify.mismatches
+      - verify.vf_results
+    verdict_field: verify.verdict
+    verdicts:
+      PASS:
+        next: deposition
+      FAIL:
+        next: implement
+        retry:
+          max_rounds: 2
+          exhausted: escalation
+
+  deposition:
+    artifact: DEPOSITION_LOG.md
+    optional: true
+    required_fields:
+      - channels
+      - results
+    verdict_field: deposition.verdict
+    verdicts:
+      DONE:
+        next: null  # terminal
+      PARTIAL:
+        next: null  # terminal, channel failures logged
+      SKIPPED:
+        next: null
+    approval_policy: never_if_schema_valid
