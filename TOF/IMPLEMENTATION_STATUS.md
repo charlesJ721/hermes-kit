@@ -13,11 +13,14 @@ All checks below produce INVALID receipts when violated. Backed by 14 fixture te
 | Stale downstream detection | `check_stale()` + `apply_stale_to_all()` — global artifact truth | P0.2a |
 | Model family diversity | `model_policy.family_must_differ_from` — registry-backed check | P0.1 |
 | Model family consistency | `actual_family` must match `models.yaml[assigned_model].family` | P0.2b |
+| OT verification (who actually ran) | SessionAuditAdapter → reads agent.log → injects actual_model/fallback into receipt | P0.2b |
+| Orchestrator (tof run) | Receipt-driven state machine loop with OT subprocess dispatch | v3 |
 | Retry budget | `validate_retry_budget()` — `>=max_rounds` → escalation | P0.1 |
 | Verdict validation | Invalid verdict → INVALID | P0.1 |
 | Config source tracking | Receipt embeds `pipeline_path` + `pipeline_sha256` + `models_path` + `models_sha256` | P0.3 |
 | Model freshness | `model_freshness.max_staleness_days` + `on_stale` (warning/blocking) | post-review |
 | Timeout policy validation | `timeout_policy` struct check in lint-pipeline | post-review |
+| Model assignment validation | lint-pipeline checks model field exists and is in models.yaml | v3 |
 
 ## BEHAVIORAL — Documented protocol, not enforced by code
 
@@ -27,7 +30,6 @@ These are documented for correct operation. Violations are detectable by a human
 |----------|-------------|-------|
 | STATE_LOCKER | CORE_CONCEPTS.md | Interactive UX protocol; no runtime interceptor exists |
 | Orchestrator behavior boundaries | CORE_CONCEPTS.md | Orchestrator must not do downstream phase work; enforced by discipline |
-| OT verification (who actually ran) | OT.md | Manual: session records + cross-session audit + API log trace |
 | Phase EX escalation | PHASES.md | Human-in-the-loop decision; validator detects condition but routing is manual |
 
 ## DEFERRED — Adapter implementations not yet built
@@ -36,8 +38,8 @@ These are defined in `adapter-contract.md` but have no real implementation yet. 
 
 | Adapter | Status |
 |---------|--------|
-| DispatchAdapter | Fake: model identity from frontmatter `produced_by`, not from an actual dispatch system |
-| SessionAuditAdapter | Not implemented: no way to independently verify `actual_model`/`actual_family`/`fallback_detected` |
+| DispatchAdapter | Live: Orchestrator dispatches via `hermes chat -q` OT subprocess |
+| SessionAuditAdapter | Live: reads agent.log → actual_model/actual_family/fallback_detected (137 lines) |
 | ArtifactStore | Inline: reads `.md` files directly from the filesystem |
 | ModelRegistryAdapter | Not implemented: model slug freshness checked manually |
 | KnowledgeDepositionAdapter | Not implemented |
