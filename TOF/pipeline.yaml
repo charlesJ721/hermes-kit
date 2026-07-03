@@ -4,6 +4,19 @@
 
 version: "0.1"
 
+# ---- Runtime policies (enforced by tof validate) ----
+
+timeout_policy:
+  max_retries: 3
+  retry_interval_seconds: 60
+  on_exhaustion: blocking_ex
+
+model_freshness:
+  max_staleness_days: 30
+  on_stale: warning   # "warning" (⚠️ in receipt) | "blocking" (INVALID)
+
+# ---- Phase definitions ----
+
 phases:
   clarify:
     artifact: TASK.md

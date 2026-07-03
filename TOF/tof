@@ -880,6 +880,27 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None,
     phase_names = [name for name, _ in phases]
     phase_cfgs = {name: cfg for name, cfg in phases}
 
+    # Model freshness check
+    freshness_warnings: List[str] = []
+    freshness_policy = pipeline.get("model_freshness", {})
+    if isinstance(freshness_policy, dict):
+        max_days = freshness_policy.get("max_staleness_days", 30)
+        on_stale = freshness_policy.get("on_stale", "warning")
+        now = _dt.datetime.now(_dt.timezone.utc).date()
+        for mid, mdata in models_yaml.get("models", {}).items():
+            checked = mdata.get("freshness_checked_at")
+            if not checked:
+                freshness_warnings.append(f"model {mid}: no freshness_checked_at date")
+                continue
+            try:
+                checked_date = _dt.date.fromisoformat(str(checked))
+                days = (now - checked_date).days
+                if days > max_days:
+                    msg = f"model {mid}: freshness_checked_at={checked} ({days}d ago, max={max_days}d)"
+                    freshness_warnings.append(msg)
+            except (ValueError, TypeError):
+                freshness_warnings.append(f"model {mid}: invalid freshness_checked_at={checked}")
+
     artifacts = scan_artifacts(run_dir, pipeline)
     if not artifacts:
         first = next((name for name, cfg in phases if not cfg.get("optional")), phase_names[0])
@@ -940,6 +961,13 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None,
     else:
         required_action = None
 
+    # Model freshness: if on_stale=blocking and any model is stale, mark INVALID
+    if on_stale == "blocking" and freshness_warnings:
+        status = "INVALID"
+        next_allowed = []
+        required_action = "rerun_current_phase"
+        reasons.extend(f"freshness: {w}" for w in freshness_warnings)
+
     # Find causal frontier (stale now in artifact_results, frontier correctly excludes stale)
     frontier_status, frontier_art = find_causal_frontier(phase_names, artifact_results, by_phase, latest_by_phase)
 
@@ -968,6 +996,8 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None,
         "pipeline": {"path": str(pipeline_path), "sha256": pipeline_sha},
         "models": {"path": str(models_path), "sha256": models_sha},
     }
+    if freshness_warnings:
+        receipt["validation"]["freshness_warnings"] = freshness_warnings
 
     print(json.dumps(receipt, indent=2))
 
@@ -1061,6 +1091,21 @@ def lint_pipeline(override_pipeline: Optional[Path] = None) -> int:
     deposition = dict(phases).get("deposition")
     if deposition is not None and (not isinstance(deposition, dict) or deposition.get("optional") is not True):
         errors.append("deposition must be marked optional: true")
+
+    # Check top-level runtime policies
+    tp = pipeline.get("timeout_policy")
+    if isinstance(tp, dict):
+        for key in ["max_retries", "retry_interval_seconds"]:
+            if not isinstance(tp.get(key), int):
+                errors.append(f"timeout_policy.{key} must be an integer")
+        if tp.get("on_exhaustion") not in ("blocking_ex", None):
+            errors.append(f"timeout_policy.on_exhaustion must be 'blocking_ex'")
+    mf = pipeline.get("model_freshness")
+    if isinstance(mf, dict):
+        if not isinstance(mf.get("max_staleness_days"), int):
+            errors.append("model_freshness.max_staleness_days must be an integer")
+        if mf.get("on_stale") not in ("warning", "blocking"):
+            errors.append("model_freshness.on_stale must be 'warning' or 'blocking'")
 
     for name, cfg in phases:
         if name not in referenced and not cfg.get("optional") and name != phases[0][0]:
