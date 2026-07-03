@@ -34,6 +34,7 @@ verification_confidence:
 phases:
   clarify:
     artifact: TASK.md
+    model: deepseek-v4-flash
     inputs: {}
     required_fields:
       - task.scope
@@ -50,6 +51,7 @@ phases:
 
   scout:
     artifact: RESEARCH.md
+    model: claude-opus-4.8
     inputs:
       required:
         - clarify
@@ -77,6 +79,7 @@ phases:
 
   establish:
     artifact: PLAN.md
+    model: gpt-5.5
     inputs:
       required:
         - clarify
@@ -100,6 +103,7 @@ phases:
 
   review:
     artifact: REVIEW.md
+    model: gemini-3.1-pro-preview
     inputs:
       required:
         - scout
@@ -124,6 +128,7 @@ phases:
 
   implement:
     artifact: IMPLEMENTATION_LOG.md
+    model: gpt-5.5
     inputs:
       required:
         - establish
@@ -145,6 +150,7 @@ phases:
 
   verify:
     artifact: VERIFICATION.md
+    model: deepseek-v4-pro
     inputs:
       required:
         - establish

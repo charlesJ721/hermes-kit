@@ -1092,6 +1092,18 @@ def lint_pipeline(override_pipeline: Optional[Path] = None) -> int:
     if deposition is not None and (not isinstance(deposition, dict) or deposition.get("optional") is not True):
         errors.append("deposition must be marked optional: true")
 
+    # Check model assignments against registry
+    models_yaml = load_yaml_file(locate_config(Path.cwd(), "models.yaml"))
+    model_registry = load_model_registry(models_yaml)
+    for name, cfg in phases:
+        if cfg.get("optional"):
+            continue
+        assigned = cfg.get("model")
+        if not assigned or not isinstance(assigned, str) or not assigned.strip():
+            errors.append(f"phase {name}: missing or empty model assignment")
+        elif assigned not in model_registry:
+            errors.append(f"phase {name}: model {assigned!r} not in models.yaml")
+
     # Check top-level runtime policies
     tp = pipeline.get("timeout_policy")
     if isinstance(tp, dict):
@@ -1146,6 +1158,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_lint = sub.add_parser("lint-pipeline", help="check pipeline.yaml internal consistency")
     p_lint.add_argument("--pipeline", type=Path, default=None, help="explicit pipeline.yaml path")
 
+    p_run = sub.add_parser("run", help="orchestrate a TOF run (receipt-driven loop)")
+    p_run.add_argument("run_dir", help="TOF run directory")
+    p_run.add_argument("--step", action="store_true", help="single-step, one phase only")
+
     args = parser.parse_args(argv)
 
     if args.command == "validate":
@@ -1154,6 +1170,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                            override_models=args.models)
     if args.command == "lint-pipeline":
         return lint_pipeline(override_pipeline=args.pipeline)
+    if args.command == "run":
+        from orchestrator import run as orch_run
+        return orch_run(args.run_dir, step_mode=args.step)
     parser.error("unknown command")
     return 2
 
