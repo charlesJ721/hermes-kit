@@ -8,16 +8,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 TOF = ROOT / "tof"
 CASES = {
-    "test-01-missing-unknowns": ("INVALID", []),
-    "test-02-same-family-review": ("INVALID", []),
-    "test-03-blocking-with-retry": ("BLOCKING", ["establish"]),
-    "test-04-retry-exhausted": ("BLOCKING", ["escalation"]),
-    "test-05-artifact-claims-next": ("INVALID", []),
-    "test-06-hash-mismatch": ("INVALID", []),
+    # P0.1 fixtures
+    "test-01-missing-unknowns": ("INVALID", [], {}),
+    "test-02-same-family-review": ("INVALID", [], {}),
+    "test-03-blocking-with-retry": ("BLOCKING", ["establish"], {}),
+    "test-04-retry-exhausted": ("BLOCKING", ["escalation"], {}),
+    "test-05-artifact-claims-next": ("INVALID", [], {}),
+    "test-06-hash-mismatch": ("INVALID", [], {}),
+    # P0.2a fixtures
+    "test-a-path-mismatch-phase": ("INVALID", [], {"input_linkage": "BLOCKING"}),
+    "test-b-path-pipeline-yaml": ("INVALID", [], {"input_linkage": "BLOCKING"}),
+    "test-c-stale-downstream": ("INVALID", [], {"stale": "BLOCKING"}),
+    "test-d-invalid-upstream-no-stale": ("PASS", [], {}),
+    "test-e-self-reference": ("INVALID", [], {"input_linkage": "BLOCKING"}),
+    "test-f-no-path-sha-match": ("PASS", [], {"input_linkage": "PASS"}),
 }
 
 failures = []
-for name, (status, next_allowed) in CASES.items():
+for name, (status, next_allowed, check_checks) in CASES.items():
     proc = subprocess.run([str(TOF), "validate", str(ROOT / "test-fixtures" / name)], text=True, capture_output=True)
     if proc.returncode != 0:
         failures.append(f"{name}: default exit {proc.returncode}, expected 0; stderr={proc.stderr!r}")
@@ -33,6 +41,11 @@ for name, (status, next_allowed) in CASES.items():
         failures.append(f"{name}: next_allowed {validation.get('next_allowed')} != {next_allowed}")
     if status == "INVALID" and validation.get("required_action") != "rerun_current_phase":
         failures.append(f"{name}: INVALID missing required_action=rerun_current_phase")
+    # Optional per-fixture check assertions
+    for ck, cv in check_checks.items():
+        actual = validation.get("checks", {}).get(ck)
+        if actual != cv:
+            failures.append(f"{name}: checks.{ck}={actual} != {cv}")
 
 FAIL_ON = [
     (["test-01-missing-unknowns", "--fail-on", "invalid"], 1),

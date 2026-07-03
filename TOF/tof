@@ -280,7 +280,7 @@ def build_indices(artifacts: List[Artifact]) -> Tuple[Dict[str, Artifact], Dict[
     by_phase: Dict[str, List[Artifact]] = {}
     by_sha: Dict[str, List[Artifact]] = {}
     for art in artifacts:
-        by_path[art.path.name] = art
+        by_path[str(art.path.resolve())] = art
         by_phase.setdefault(art.phase, []).append(art)
         by_sha.setdefault(art.sha256, []).append(art)
     for items in by_phase.values():
@@ -341,7 +341,7 @@ def resolve_input_edges(artifacts: List[Artifact], by_path: Dict[str, Artifact],
                     ref.valid = False
                     ref.reason = f"input path not found: {ref.path}"
                     continue
-                target = by_path.get(target_path.name)
+                target = by_path.get(str(target_path))
                 if target is None:
                     ref.valid = False
                     ref.reason = f"path exists but is not a TOF artifact: {ref.path}"
@@ -564,23 +564,29 @@ def validate_input_linkage(art: Artifact, phase_cfg: Dict[str, Any],
 
     ok = True
 
-    # Build a map of resolved inputs by phase
-    input_by_phase: Dict[str, InputRef] = {}
+    # Collect refs by phase (list — preserves duplicates for error reporting)
+    refs_by_phase: Dict[str, List[InputRef]] = {}
     for ref in art.inputs:
         if ref.declared_phase:
-            input_by_phase[ref.declared_phase] = ref
+            refs_by_phase.setdefault(ref.declared_phase, []).append(ref)
+
+    # Detect duplicate phase refs
+    for phase, refs in refs_by_phase.items():
+        if len(refs) > 1:
+            ok = False
+            reasons.append(f"input linkage: duplicate phase reference '{phase}' — exactly one input per phase required")
 
     # Check required
     for req_phase in inputs_cfg.get("required", []) or []:
         req_phase = str(req_phase)
-        if req_phase not in input_by_phase:
+        if req_phase not in refs_by_phase:
             ok = False
             reasons.append(f"input linkage missing required upstream: {req_phase}")
             continue
-        ref = input_by_phase[req_phase]
-        if not ref.valid:
-            ok = False
-            reasons.append(f"input linkage for {req_phase}: {ref.reason}")
+        for ref in refs_by_phase[req_phase]:
+            if not ref.valid:
+                ok = False
+                reasons.append(f"input linkage for {req_phase}: {ref.reason}")
 
     # Check required_if_present
     for req_if_phase in inputs_cfg.get("required_if_present", []) or []:
@@ -589,14 +595,14 @@ def validate_input_linkage(art: Artifact, phase_cfg: Dict[str, Any],
         if req_if_phase not in by_phase:
             continue
         # Phase exists — must be referenced
-        if req_if_phase not in input_by_phase:
+        if req_if_phase not in refs_by_phase:
             ok = False
             reasons.append(f"input linkage: phase={req_if_phase} exists in run but not referenced (required_if_present)")
             continue
-        ref = input_by_phase[req_if_phase]
-        if not ref.valid:
-            ok = False
-            reasons.append(f"input linkage for {req_if_phase}: {ref.reason}")
+        for ref in refs_by_phase[req_if_phase]:
+            if not ref.valid:
+                ok = False
+                reasons.append(f"input linkage for {req_if_phase}: {ref.reason}")
 
     return "PASS" if ok else "BLOCKING"
 
