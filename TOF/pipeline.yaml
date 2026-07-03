@@ -16,7 +16,11 @@ timeout_policy:
 
 model_freshness:
   max_staleness_days: 30
-  on_stale: warning   # "warning" (⚠️ in receipt) | "blocking" (INVALID)
+  # Default "warning": logs staleness in receipt but does NOT block the pipeline.
+  # Change to "blocking" if model slug accuracy is safety-critical for your
+  # deployment — e.g. if a stale slug could cause OT to silently fallback to a
+  # different model family, compromising the Review diversity guarantee.
+  on_stale: warning
 
 # ---- Phase definitions ----
 
