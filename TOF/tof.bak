@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-"""TOF P0.2a — Causal validation layer.
+"""TOF P0 minimal orchestrator runtime.
 
 Read-only validator and pipeline consistency linter.
 Dependencies: Python stdlib + PyYAML.
-
-P0.2a additions:
-  - InputRef resolution: path → verify TOF artifact, phase match, sha256 match
-  - All-artifact checks (not just current)
-  - Stale downstream detection
-  - Causal frontier tracking
 """
 
 from __future__ import annotations
@@ -20,33 +14,18 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import yaml
-except ImportError:
+except ImportError:  # pragma: no cover - user-friendly runtime error
     print("error: PyYAML is required (import yaml failed)", file=sys.stderr)
     sys.exit(2)
 
 SPECIAL_NEXT = {None, "pause", "escalation", "exploration"}
 PASSISH_VERDICTS = {"PASS", "READY", "DONE"}
-
-
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
-@dataclass
-class InputRef:
-    """A single input reference from tof.inputs[] in artifact frontmatter."""
-    declared_phase: str
-    sha256: str
-    path: Optional[str] = None
-    resolved: Optional["Artifact"] = None
-    valid: bool = False
-    reason: str = ""
 
 
 @dataclass
@@ -57,12 +36,7 @@ class Artifact:
     phase: str
     round: int
     sha256: str
-    inputs: List[InputRef] = field(default_factory=list)
 
-
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
 
 def die(message: str, code: int = 2) -> None:
     print(f"error: {message}", file=sys.stderr)
@@ -91,13 +65,14 @@ def load_yaml_file(path: Path) -> Dict[str, Any]:
 def candidate_config_paths(run_dir: Optional[Path], filename: str) -> List[Path]:
     paths: List[Path] = []
     if run_dir is not None:
-        paths.append((run_dir / filename).resolve())       # run dir itself (fixture-local)
-        paths.append((run_dir / ".." / filename).resolve())  # parent dir
+        paths.append((run_dir / filename).resolve())
+        paths.append((run_dir / ".." / filename).resolve())
     paths.append((Path.cwd() / filename).resolve())
     tof_dir = os.environ.get("TOF_DIR")
     if tof_dir:
         paths.append((Path(tof_dir) / filename).resolve())
     paths.append((Path(__file__).resolve().parent / filename).resolve())
+
     deduped: List[Path] = []
     seen = set()
     for p in paths:
@@ -159,22 +134,6 @@ def is_nonempty(value: Any) -> bool:
     return True
 
 
-def file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def validation_id() -> str:
-    return "val_" + _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
-
-
-# ---------------------------------------------------------------------------
-# Frontmatter parsing
-# ---------------------------------------------------------------------------
-
 def parse_frontmatter(path: Path) -> Optional[Tuple[Dict[str, Any], str]]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -210,33 +169,27 @@ def parse_frontmatter(path: Path) -> Optional[Tuple[Dict[str, Any], str]]:
     return fm, body
 
 
-def parse_input_refs(fm: Dict[str, Any]) -> List[InputRef]:
-    """Parse tof.inputs from artifact frontmatter into InputRef objects."""
-    tof = fm.get("tof")
-    if not isinstance(tof, dict):
-        return []
-    raw = tof.get("inputs", [])
-    if not isinstance(raw, list):
-        return []
-    refs: List[InputRef] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        phase = item.get("phase")
-        sha = item.get("sha256")
-        if not phase or not sha:
-            continue
-        refs.append(InputRef(
-            declared_phase=str(phase),
-            sha256=str(sha),
-            path=str(item["path"]) if "path" in item and item["path"] else None,
-        ))
-    return refs
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Scanning & indexing
-# ---------------------------------------------------------------------------
+def find_forbidden_next_allowed(obj: Any, prefix: str = "") -> List[str]:
+    found: List[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            key_path = f"{prefix}.{k}" if prefix else str(k)
+            if k == "next_allowed":
+                found.append(key_path)
+            found.extend(find_forbidden_next_allowed(v, key_path))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            found.extend(find_forbidden_next_allowed(v, f"{prefix}[{i}]"))
+    return found
+
 
 def scan_artifacts(run_dir: Path, pipeline: Dict[str, Any]) -> List[Artifact]:
     phases = {name for name, _cfg in phase_items(pipeline)}
@@ -262,30 +215,17 @@ def scan_artifacts(run_dir: Path, pipeline: Dict[str, Any]) -> List[Artifact]:
             round_num = int(round_raw)
         except (TypeError, ValueError):
             round_num = 1
-        refs = parse_input_refs(fm)
-        artifacts.append(Artifact(
-            path=path,
-            frontmatter=fm,
-            content=body,
-            phase=phase,
-            round=round_num,
-            sha256=file_sha256(path),
-            inputs=refs,
-        ))
+        artifacts.append(
+            Artifact(
+                path=path,
+                frontmatter=fm,
+                content=body,
+                phase=phase,
+                round=round_num,
+                sha256=file_sha256(path),
+            )
+        )
     return artifacts
-
-
-def build_indices(artifacts: List[Artifact]) -> Tuple[Dict[str, Artifact], Dict[str, List[Artifact]], Dict[str, List[Artifact]]]:
-    by_path: Dict[str, Artifact] = {}
-    by_phase: Dict[str, List[Artifact]] = {}
-    by_sha: Dict[str, List[Artifact]] = {}
-    for art in artifacts:
-        by_path[art.path.name] = art
-        by_phase.setdefault(art.phase, []).append(art)
-        by_sha.setdefault(art.sha256, []).append(art)
-    for items in by_phase.values():
-        items.sort(key=lambda a: (a.round, a.path.stat().st_mtime, a.path.name))
-    return by_path, by_phase, by_sha
 
 
 def group_artifacts(artifacts: Iterable[Artifact]) -> Tuple[Dict[str, List[Artifact]], Dict[str, Artifact]]:
@@ -299,87 +239,9 @@ def group_artifacts(artifacts: Iterable[Artifact]) -> Tuple[Dict[str, List[Artif
     return grouped, latest
 
 
-# ---------------------------------------------------------------------------
-# Input edge resolution (P0.2a core)
-# ---------------------------------------------------------------------------
+def validation_id() -> str:
+    return "val_" + _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
 
-def resolve_input_edges(artifacts: List[Artifact], by_path: Dict[str, Artifact],
-                        by_phase: Dict[str, List[Artifact]], by_sha: Dict[str, List[Artifact]]) -> List[str]:
-    """Resolve each artifact's InputRefs to target Artifact nodes.
-    
-    For each input ref:
-    - If `path` specified: target must exist, be a TOF artifact, phase must match, sha256 must match
-    - If no `path`: match by (phase + sha256) in by_sha
-    - Detects: self-reference, duplicate phase, phase mismatch, sha mismatch
-    
-    Returns warnings list (non-fatal issues).
-    """
-    warnings: List[str] = []
-    
-    for art in artifacts:
-        seen_phases: set[str] = set()
-        for ref in art.inputs:
-            # --- Self-reference check ---
-            if ref.path:
-                target_abs = (art.path.parent / ref.path).resolve()
-                if target_abs == art.path.resolve():
-                    ref.valid = False
-                    ref.reason = "self-reference: input path points to own artifact"
-                    continue
-            
-            # --- Duplicate phase check ---
-            if ref.declared_phase in seen_phases:
-                ref.valid = False
-                ref.reason = f"duplicate phase reference: {ref.declared_phase}"
-                continue
-            seen_phases.add(ref.declared_phase)
-            
-            if ref.path:
-                # --- Path-based resolution ---
-                target_path = (art.path.parent / ref.path).resolve()
-                if not target_path.exists():
-                    ref.valid = False
-                    ref.reason = f"input path not found: {ref.path}"
-                    continue
-                target = by_path.get(target_path.name)
-                if target is None:
-                    ref.valid = False
-                    ref.reason = f"path exists but is not a TOF artifact: {ref.path}"
-                    continue
-                if target.phase != ref.declared_phase:
-                    ref.valid = False
-                    ref.reason = (f"input phase mismatch: declared={ref.declared_phase} "
-                                  f"but {ref.path} has phase={target.phase}")
-                    continue
-                if target.sha256 != ref.sha256:
-                    ref.valid = False
-                    ref.reason = f"sha256 mismatch for {ref.path}"
-                    continue
-                ref.resolved = target
-                ref.valid = True
-            else:
-                # --- Phase+sha resolution (no path) ---
-                candidates = by_sha.get(ref.sha256, [])
-                phase_candidates = [c for c in candidates if c.phase == ref.declared_phase]
-                if not phase_candidates:
-                    ref.valid = False
-                    ref.reason = (f"no artifact found for phase={ref.declared_phase} "
-                                  f"with matching sha256={ref.sha256[:16]}...")
-                    continue
-                if len(phase_candidates) > 1:
-                    warnings.append(
-                        f"{art.path.name}: multiple artifacts match phase={ref.declared_phase} "
-                        f"sha256={ref.sha256[:16]}...; using first"
-                    )
-                ref.resolved = phase_candidates[0]
-                ref.valid = True
-    
-    return warnings
-
-
-# ---------------------------------------------------------------------------
-# Model registry helpers
-# ---------------------------------------------------------------------------
 
 def load_model_registry(models_yaml: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     models = models_yaml.get("models", {})
@@ -397,6 +259,7 @@ def produced_by(fm: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def resolve_family_for_artifact(art: Artifact, models: Dict[str, Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    """Return (family, error). Artifact actual_family is evidence, model registry guards unknown IDs."""
     pb = produced_by(art.frontmatter)
     model_id = pb.get("assigned_model") or pb.get("claimed_model")
     if model_id and model_id not in models:
@@ -409,62 +272,6 @@ def resolve_family_for_artifact(art: Artifact, models: Dict[str, Dict[str, Any]]
         if family:
             return str(family), None
     return None, "unknown model family"
-
-
-# ---------------------------------------------------------------------------
-# Per-artifact validation checks
-# ---------------------------------------------------------------------------
-
-def compute_artifact_checks(art: Artifact, phase_cfg: Dict[str, Any],
-                            by_phase: Dict[str, List[Artifact]],
-                            latest_by_phase: Dict[str, Artifact],
-                            models: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """Compute all checks for a single artifact. Returns {checks, reasons, status, verdict}."""
-    reasons: List[str] = []
-    checks: Dict[str, str] = {}
-
-    # Forbidden next_allowed field
-    forbidden_paths = find_forbidden_next_allowed(art.frontmatter)
-    for p in forbidden_paths:
-        warn(f"{art.path.name}: frontmatter field '{p}' is evidence, not authority; ignoring")
-        reasons.append(f"ignored artifact-declared {p}; transition derived from pipeline.yaml")
-
-    checks["schema"] = validate_schema(art, phase_cfg, reasons)
-    checks["input_linkage"] = validate_input_linkage(art, phase_cfg, by_phase, reasons)
-    checks["model_policy"] = validate_model_policy(art, phase_cfg, latest_by_phase, models, reasons)
-
-    # Verdict
-    try:
-        verdict = str(get_path(art.frontmatter, str(phase_cfg.get("verdict_field"))))
-    except KeyError:
-        verdict = None
-
-    any_check_blocking = any(v in {"FAIL", "BLOCKING"} for v in checks.values())
-
-    if any_check_blocking:
-        status = "INVALID"
-    elif verdict in {"BLOCKING", "FAIL"}:
-        status = "BLOCKING"
-    elif verdict in PASSISH_VERDICTS:
-        status = "PASS"
-    else:
-        status = verdict or "UNKNOWN"
-
-    # Transition / retry only for valid artifacts
-    next_allowed: List[Any] = []
-    if not any_check_blocking and verdict in {"BLOCKING", "FAIL"} | PASSISH_VERDICTS:
-        checks_real = dict(checks)
-        checks_real["transition"], next_allowed = derive_transition(art, phase_cfg, by_phase, reasons)
-        checks_real["retry_budget"], next_allowed = validate_retry_budget(art, phase_cfg, by_phase, next_allowed, reasons)
-        checks = checks_real
-
-    return {
-        "checks": checks,
-        "status": status,
-        "verdict": verdict,
-        "next_allowed": next_allowed,
-        "reasons": reasons,
-    }
 
 
 def validate_schema(art: Artifact, phase_cfg: Dict[str, Any], reasons: List[str]) -> str:
@@ -514,9 +321,12 @@ def validate_schema(art: Artifact, phase_cfg: Dict[str, Any], reasons: List[str]
     return "PASS" if ok else "BLOCKING"
 
 
-def derive_transition(art: Artifact, phase_cfg: Dict[str, Any],
-                      grouped: Dict[str, List[Artifact]],
-                      reasons: List[str]) -> Tuple[str, List[Any]]:
+def derive_transition(
+    art: Artifact,
+    phase_cfg: Dict[str, Any],
+    grouped: Dict[str, List[Artifact]],
+    reasons: List[str],
+) -> Tuple[str, List[Any]]:
     verdict_field = phase_cfg.get("verdict_field")
     verdicts = phase_cfg.get("verdicts", {}) or {}
     try:
@@ -548,14 +358,14 @@ def derive_transition(art: Artifact, phase_cfg: Dict[str, Any],
     return "PASS", [next_value]
 
 
-def validate_input_linkage(art: Artifact, phase_cfg: Dict[str, Any],
-                           by_phase: Dict[str, List[Artifact]],
-                           reasons: List[str]) -> str:
-    """Check pipeline.yaml input requirements against resolved InputRefs.
-
-    All refs must be resolved and valid. Uses pre-computed InputRef.valid flags
-    set by resolve_input_edges().
-    """
+def validate_input_linkage(
+    art: Artifact,
+    phase_cfg: Dict[str, Any],
+    grouped: Dict[str, List[Artifact]],
+    latest_by_phase: Dict[str, Artifact],
+    reasons: List[str],
+) -> str:
+    del grouped  # Reserved for future policies that need all upstream rounds.
     inputs_cfg = phase_cfg.get("inputs", {})
     if inputs_cfg in (None, {}):
         inputs_cfg = {}
@@ -563,51 +373,91 @@ def validate_input_linkage(art: Artifact, phase_cfg: Dict[str, Any],
         return "PASS"
 
     ok = True
+    fm_tof = art.frontmatter.get("tof", {})
+    fm_inputs = fm_tof.get("inputs", []) if isinstance(fm_tof, dict) else []
+    if fm_inputs in (None, []):
+        fm_inputs = []
+    if not isinstance(fm_inputs, list):
+        reasons.append("tof.inputs must be a list")
+        return "BLOCKING"
 
-    # Build a map of resolved inputs by phase
-    input_by_phase: Dict[str, InputRef] = {}
-    for ref in art.inputs:
-        if ref.declared_phase:
-            input_by_phase[ref.declared_phase] = ref
+    input_by_phase: Dict[str, Dict[str, Any]] = {}
+    for idx, inp in enumerate(fm_inputs):
+        if not isinstance(inp, dict):
+            ok = False
+            reasons.append(f"tof.inputs[{idx}] must be a mapping")
+            continue
+        phase = inp.get("phase")
+        if phase:
+            input_by_phase[str(phase)] = inp
 
-    # Check required
-    for req_phase in inputs_cfg.get("required", []) or []:
-        req_phase = str(req_phase)
+    def verify_declared(req_phase: str, missing_reason: str, path_missing_prefix: str) -> None:
+        nonlocal ok
         if req_phase not in input_by_phase:
             ok = False
-            reasons.append(f"input linkage missing required upstream: {req_phase}")
-            continue
-        ref = input_by_phase[req_phase]
-        if not ref.valid:
+            reasons.append(missing_reason)
+            return
+        inp = input_by_phase[req_phase]
+        declared = inp.get("sha256")
+        if not declared:
             ok = False
-            reasons.append(f"input linkage for {req_phase}: {ref.reason}")
+            reasons.append(f"input linkage for {req_phase}: missing sha256")
+            return
 
-    # Check required_if_present
+        if inp.get("path"):
+            target_path = art.path.parent / str(inp["path"])
+            if target_path.exists():
+                actual = file_sha256(target_path)
+            else:
+                ok = False
+                reasons.append(f"input linkage for {req_phase}: {path_missing_prefix}: {inp['path']}")
+                return
+        else:
+            target = latest_by_phase.get(req_phase)
+            if target is None:
+                ok = False
+                reasons.append(f"input linkage artifact not found for phase={req_phase}")
+                return
+            actual = target.sha256
+
+        if str(declared) != actual:
+            ok = False
+            reasons.append(
+                f"input linkage sha256 mismatch for phase={req_phase}: "
+                f"declared={str(declared)[:16]}... actual={actual[:16]}..."
+            )
+
+    for req_phase in inputs_cfg.get("required", []) or []:
+        verify_declared(
+            str(req_phase),
+            f"input linkage missing required upstream: {req_phase}",
+            "declared path not found",
+        )
+
     for req_if_phase in inputs_cfg.get("required_if_present", []) or []:
         req_if_phase = str(req_if_phase)
-        # Does this phase have any artifact in the run?
-        if req_if_phase not in by_phase:
+        if req_if_phase not in latest_by_phase:
             continue
-        # Phase exists — must be referenced
-        if req_if_phase not in input_by_phase:
-            ok = False
-            reasons.append(f"input linkage: phase={req_if_phase} exists in run but not referenced (required_if_present)")
-            continue
-        ref = input_by_phase[req_if_phase]
-        if not ref.valid:
-            ok = False
-            reasons.append(f"input linkage for {req_if_phase}: {ref.reason}")
+        verify_declared(
+            req_if_phase,
+            f"input linkage: phase={req_if_phase} exists but not referenced (required_if_present)",
+            "path not found",
+        )
 
     return "PASS" if ok else "BLOCKING"
 
 
-def validate_model_policy(art: Artifact, phase_cfg: Dict[str, Any],
-                          latest_by_phase: Dict[str, Artifact],
-                          models: Dict[str, Dict[str, Any]],
-                          reasons: List[str]) -> str:
+def validate_model_policy(
+    art: Artifact,
+    phase_cfg: Dict[str, Any],
+    latest_by_phase: Dict[str, Artifact],
+    models: Dict[str, Dict[str, Any]],
+    reasons: List[str],
+) -> str:
     policy = phase_cfg.get("model_policy") or {}
     if not isinstance(policy, dict) or not policy:
         return "PASS"
+
     ok = True
     if "family_must_differ_from" in policy:
         other_phase = str(policy["family_must_differ_from"])
@@ -631,10 +481,13 @@ def validate_model_policy(art: Artifact, phase_cfg: Dict[str, Any],
     return "PASS" if ok else "BLOCKING"
 
 
-def validate_retry_budget(art: Artifact, phase_cfg: Dict[str, Any],
-                          grouped: Dict[str, List[Artifact]],
-                          next_allowed: List[Any],
-                          reasons: List[str]) -> Tuple[str, List[Any]]:
+def validate_retry_budget(
+    art: Artifact,
+    phase_cfg: Dict[str, Any],
+    grouped: Dict[str, List[Artifact]],
+    next_allowed: List[Any],
+    reasons: List[str],
+) -> Tuple[str, List[Any]]:
     verdict_field = phase_cfg.get("verdict_field")
     verdicts = phase_cfg.get("verdicts", {}) or {}
     try:
@@ -657,105 +510,6 @@ def validate_retry_budget(art: Artifact, phase_cfg: Dict[str, Any],
     return "PASS", next_allowed
 
 
-def find_forbidden_next_allowed(obj: Any, prefix: str = "") -> List[str]:
-    found: List[str] = []
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            key_path = f"{prefix}.{k}" if prefix else str(k)
-            if k == "next_allowed":
-                found.append(key_path)
-            found.extend(find_forbidden_next_allowed(v, key_path))
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            found.extend(find_forbidden_next_allowed(v, f"{prefix}[{i}]"))
-    return found
-
-
-# ---------------------------------------------------------------------------
-# Stale detection & frontier (P0.2a core)
-# ---------------------------------------------------------------------------
-
-def find_causal_frontier(phase_names: List[str], artifact_results: Dict[str, Any],
-                          by_phase: Dict[str, List[Artifact]],
-                          latest_by_phase: Dict[str, Artifact]) -> Tuple[Optional[str], Optional[Artifact]]:
-    """Find the latest causal-valid artifact frontier.
-    
-    An artifact is causal-valid if:
-    - Its checks all PASS (status PASS or BLOCKING, not INVALID)
-    - All required upstream inputs are resolved and valid
-    
-    Returns (status_string, artifact) where status_string is the frontier's status
-    or None if no valid frontier exists.
-    """
-    # For P0.2a: find the latest phase (by DAG order) that has a valid artifact
-    frontier_art: Optional[Artifact] = None
-    frontier_status: Optional[str] = None
-    
-    for phase in reversed(phase_names):
-        latest = latest_by_phase.get(phase)
-        if latest is None:
-            continue
-        result = artifact_results.get(latest.sha256)
-        if result is None:
-            continue
-        st = result.get("status")
-        if st == "INVALID":
-            # Check if there's an earlier round that's valid
-            revisions = by_phase.get(phase, [])
-            for art in reversed(revisions):
-                r = artifact_results.get(art.sha256)
-                if r and r.get("status") != "INVALID" and r.get("status") != "UNKNOWN":
-                    frontier_art = art
-                    frontier_status = r["status"]
-                    break
-        else:
-            frontier_art = latest
-            frontier_status = st
-        if frontier_art:
-            break
-    
-    return frontier_status, frontier_art
-
-
-def check_stale(current_art: Artifact, by_phase: Dict[str, List[Artifact]],
-                artifact_results: Dict[str, Any]) -> Tuple[bool, List[str]]:
-    """Check if current_art references stale upstream artifacts.
-    
-    Returns (is_stale, reasons).
-    An artifact is stale if any of its input refs points to an upstream phase
-    that has a newer artifact which is itself valid (not INVALID).
-    """
-    stale_reasons: List[str] = []
-    for ref in current_art.inputs:
-        if not ref.valid or not ref.resolved:
-            continue
-        phase = ref.declared_phase
-        revisions = by_phase.get(phase, [])
-        for candidate in reversed(revisions):
-            if candidate is ref.resolved:
-                break  # no newer revision
-            if candidate.round <= ref.resolved.round and candidate.path == ref.resolved.path:
-                continue
-            # This is a newer artifact. Is it valid?
-            cres = artifact_results.get(candidate.sha256)
-            if cres and cres.get("status") not in ("INVALID", "UNKNOWN", None):
-                # Newer valid artifact exists with different content
-                if candidate.sha256 != ref.sha256:
-                    return True, [
-                        f"stale downstream: {current_art.path.name} references "
-                        f"{ref.declared_phase} round {ref.resolved.round}, but phase has newer "
-                        f"valid artifact (round {candidate.round}) with different content"
-                    ]
-                else:
-                    # Same content, idempotent re-run — not stale
-                    break
-    return False, stale_reasons
-
-
-# ---------------------------------------------------------------------------
-# Main validation
-# ---------------------------------------------------------------------------
-
 def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
     pipeline_path = locate_config(run_dir, "pipeline.yaml")
     models_path = locate_config(run_dir, "models.yaml")
@@ -767,6 +521,8 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
     phase_cfgs = {name: cfg for name, cfg in phases}
 
     artifacts = scan_artifacts(run_dir, pipeline)
+    grouped, latest_by_phase = group_artifacts(artifacts)
+
     if not artifacts:
         first = next((name for name, cfg in phases if not cfg.get("optional")), phase_names[0])
         receipt = {
@@ -784,57 +540,49 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
         print(json.dumps(receipt, indent=2))
         return 0
 
-    # Build indices
-    by_path, by_phase, by_sha = build_indices(artifacts)
-    grouped, latest_by_phase = group_artifacts(artifacts)
-
-    # Resolve input edges
-    resolve_ws = resolve_input_edges(artifacts, by_path, by_phase, by_sha)
-    for w in resolve_ws:
-        warn(w)
-
-    # Compute checks for all artifacts
-    artifact_results: Dict[str, Any] = {}
-    for art in artifacts:
-        phase_cfg = phase_cfgs.get(art.phase)
-        if phase_cfg is None:
-            continue
-        artifact_results[art.sha256] = compute_artifact_checks(art, phase_cfg, by_phase, latest_by_phase, models)
-
-    # Select current attempt (latest artifact by DAG phase order)
+    # P0 validates the latest present artifact in the pipeline sequence.
     current_art: Optional[Artifact] = None
     for name in phase_names:
         if name in latest_by_phase:
             current_art = latest_by_phase[name]
     assert current_art is not None
+    phase_cfg = phase_cfgs[current_art.phase]
 
-    # Get current artifact's results
-    cur_result = artifact_results.get(current_art.sha256, {})
-    checks = dict(cur_result.get("checks", {}))
-    status = cur_result.get("status", "UNKNOWN")
-    verdict = cur_result.get("verdict")
-    next_allowed = list(cur_result.get("next_allowed", []))
-    reasons = list(cur_result.get("reasons", []))
+    reasons: List[str] = []
+    checks: Dict[str, str] = {}
 
-    # Stale detection
-    is_stale, stale_reasons = check_stale(current_art, by_phase, artifact_results)
-    if is_stale:
+    forbidden_paths = find_forbidden_next_allowed(current_art.frontmatter)
+    for p in forbidden_paths:
+        warn(f"{current_art.path.name}: frontmatter field '{p}' is evidence, not authority; ignoring")
+        reasons.append(f"ignored artifact-declared {p}; transition derived from pipeline.yaml")
+
+    checks["schema"] = validate_schema(current_art, phase_cfg, reasons)
+    checks["input_linkage"] = validate_input_linkage(current_art, phase_cfg, grouped, latest_by_phase, reasons)
+    checks["model_policy"] = validate_model_policy(current_art, phase_cfg, latest_by_phase, models, reasons)
+
+    try:
+        verdict = str(get_path(current_art.frontmatter, str(phase_cfg.get("verdict_field"))))
+    except KeyError:
+        verdict = None  # type: ignore[assignment]
+
+    any_check_blocking = any(v in {"FAIL", "BLOCKING"} for v in checks.values())
+
+    if any_check_blocking:
         status = "INVALID"
-        checks["stale"] = "BLOCKING"
-        reasons.extend(stale_reasons)
-
-    # INVALID → override transition
-    if status == "INVALID":
-        next_allowed = []
-        required_action = "rerun_current_phase"
+    elif verdict in {"BLOCKING", "FAIL"}:
+        status = "BLOCKING"
+    elif verdict in PASSISH_VERDICTS:
+        status = "PASS"
     else:
-        required_action = None
+        status = verdict or "UNKNOWN"
 
-    # Find causal frontier
-    frontier_status, frontier_art = find_causal_frontier(phase_names, artifact_results, by_phase, latest_by_phase)
+    if status == "INVALID":
+        next_allowed: List[Any] = []
+    else:
+        checks["transition"], next_allowed = derive_transition(current_art, phase_cfg, grouped, reasons)
+        checks["retry_budget"], next_allowed = validate_retry_budget(current_art, phase_cfg, grouped, next_allowed, reasons)
 
-    # Build receipt
-    receipt: Dict[str, Any] = {
+    receipt = {
         "validation": {
             "id": validation_id(),
             "artifact": current_art.path.name,
@@ -848,13 +596,6 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
     }
     if status == "INVALID":
         receipt["validation"]["required_action"] = "rerun_current_phase"
-    if frontier_art:
-        receipt["validation"]["causal_frontier"] = {
-            "artifact": frontier_art.path.name,
-            "phase": frontier_art.phase,
-            "status": frontier_status,
-        }
-
     print(json.dumps(receipt, indent=2))
 
     if fail_on == "invalid" and status == "INVALID":
@@ -866,10 +607,6 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Lint
-# ---------------------------------------------------------------------------
-
 def dotted_path_is_valid(path: Any) -> bool:
     return isinstance(path, str) and bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$", path))
 
@@ -878,7 +615,7 @@ def lint_pipeline() -> int:
     pipeline_path = locate_config(None, "pipeline.yaml")
     pipeline = load_yaml_file(pipeline_path)
     phases = phase_items(pipeline)
-    phase_names_set = {name for name, _ in phases}
+    phase_names = {name for name, _ in phases}
     errors: List[str] = []
     warnings: List[str] = []
     referenced: set[str] = set()
@@ -893,9 +630,9 @@ def lint_pipeline() -> int:
                 errors.append(f"phase {name} verdict {verdict}: rule must be mapping")
                 continue
             nxt = rule.get("next")
-            if nxt not in SPECIAL_NEXT and nxt not in phase_names_set:
+            if nxt not in SPECIAL_NEXT and nxt not in phase_names:
                 errors.append(f"phase {name} verdict {verdict}: next={nxt!r} does not reference a phase or special value")
-            if nxt in phase_names_set:
+            if nxt in phase_names:
                 referenced.add(nxt)
             retry = rule.get("retry")
             if retry is not None:
@@ -903,9 +640,9 @@ def lint_pipeline() -> int:
                     errors.append(f"phase {name} verdict {verdict}: retry must be mapping")
                 else:
                     exhausted = retry.get("exhausted")
-                    if exhausted not in SPECIAL_NEXT and exhausted not in phase_names_set:
+                    if exhausted not in SPECIAL_NEXT and exhausted not in phase_names:
                         errors.append(f"phase {name} verdict {verdict}: retry.exhausted={exhausted!r} invalid")
-                    if exhausted in phase_names_set:
+                    if exhausted in phase_names:
                         referenced.add(exhausted)
 
         for dotted in cfg.get("required_fields", []) or []:
@@ -923,7 +660,7 @@ def lint_pipeline() -> int:
                     errors.append(f"phase {name}: inputs.{group_key} must be a list")
                     continue
                 for ref_phase in group:
-                    if ref_phase not in phase_names_set:
+                    if ref_phase not in phase_names:
                         errors.append(f"phase {name}: inputs.{group_key} references non-existent phase: {ref_phase}")
                     else:
                         referenced.add(ref_phase)
@@ -933,14 +670,14 @@ def lint_pipeline() -> int:
         model_policy = cfg.get("model_policy") or {}
         if isinstance(model_policy, dict):
             other = model_policy.get("family_must_differ_from")
-            if other is not None and other not in phase_names_set:
+            if other is not None and other not in phase_names:
                 errors.append(f"phase {name}: model_policy.family_must_differ_from={other!r} is not a phase")
         else:
             errors.append(f"phase {name}: model_policy must be a mapping")
 
         approval_policy = cfg.get("approval_policy")
         if approval_policy == "never_if_schema_valid":
-            normal_nexts = [rule.get("next") for rule in verdicts.values() if isinstance(rule, dict) and rule.get("next") in phase_names_set]
+            normal_nexts = [rule.get("next") for rule in verdicts.values() if isinstance(rule, dict) and rule.get("next") in phase_names]
             if normal_nexts:
                 warnings.append(f"phase {name}: approval_policy never_if_schema_valid on non-terminal phase")
 
@@ -964,24 +701,17 @@ def lint_pipeline() -> int:
     return 1 if errors else 0
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="tof", description="TOF P0 minimal validator/runtime")
     sub = parser.add_subparsers(dest="command", required=True)
-
     p_validate = sub.add_parser("validate", help="validate the latest TOF artifact in a run directory")
     p_validate.add_argument("run_dir", help="TOF run directory containing markdown artifacts")
     p_validate.add_argument("--fail-on", choices=["invalid", "blocking", "nonpass"], default=None)
-
     sub.add_parser("lint-pipeline", help="check pipeline.yaml internal consistency")
-
     args = parser.parse_args(argv)
 
     if args.command == "validate":
-        return validate_run(Path(args.run_dir).resolve(), fail_on=args.fail_on)
+        return validate_run(Path(args.run_dir).resolve(), args.fail_on)
     if args.command == "lint-pipeline":
         return lint_pipeline()
     parser.error("unknown command")
