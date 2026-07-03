@@ -51,3 +51,13 @@ These are defined in `adapter-contract.md` but have no real implementation yet. 
 | Partially-completed Implement rollback | If Implement fails at 80%, work is discarded — no checkpoint/resume |
 | Review content quality assessment | TOF verifies Review artifact exists with different model family, not whether the review is substantive |
 | End-to-end pipeline execution | TOF validates artifacts; it does not execute model dispatches or orchestrate the pipeline | 
+
+## Cold-Read Review
+
+This framework should periodically receive **cold-read review** from someone unfamiliar with its internals. Designers are blind to the gaps that new users discover immediately. The review that produced this document found several issues that internal review would not have caught:
+
+- An external reviewer looking for `model_freshness` fields in the wrong file surfaced the CODEX/DATA separation design intent — a feature, not a bug, but only visible through outsider confusion
+- `on_stale` was described as `blocking` in documentation but implemented as `warning` — only caught by cross-referencing code against claims
+- The double-retry system (`timeout_policy` vs per-phase `retry`) was never explicitly documented until an outsider asked "how do these relate?"
+
+Convention: before each major version bump, invite a cold-read review. The reviewer should not read the documentation first — they should try to use the system and report what breaks.

@@ -96,6 +96,15 @@ Pure analysis                   → A-SRE
 Mixed                           → Serial (A-SRE first, then SERI implementation)
 ```
 
+**All four variants use the same `pipeline.yaml`.** The variant only determines which phases are mandatory for this run:
+
+| Variant | Phases run | Skips |
+|---------|-----------|-------|
+| Express | Clarify → Implement → Verify | Scout, Establish, Review |
+| Standard SERI | Clarify → Scout → Establish → Review → Implement → Verify | — |
+| Augmented SERI | Standard + external Red/Blue Team | — |
+| A-SRE | Analyze → Adversarial Review → Synthesize | Implement |
+
 ## STATE_LOCKER Protocol
 
 STATE_LOCKER is an **interactive UX protocol** for human-supervised workflows. It is NOT enforced by the P0 runtime validator — the `tof` tool does not parse or enforce STATE_LOCKER declarations. It remains useful for orchestrator self-discipline in interactive chat sessions.

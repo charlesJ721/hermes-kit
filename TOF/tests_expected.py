@@ -25,6 +25,8 @@ CASES = {
     # P0.2b fixtures
     "test-g-family-mismatch": ("INVALID", [], {"model_policy": "BLOCKING"}),
     "test-h-family-match": ("PASS", [], {"model_policy": "PASS"}),
+    # Smoke test — full 6-phase pipeline
+    "test-smoke-full-pipeline": ("PASS", [], {}),
 }
 
 failures = []
