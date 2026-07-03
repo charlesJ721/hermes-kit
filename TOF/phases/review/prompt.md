@@ -3,34 +3,35 @@ Your job: find blind spots in the design. You MUST be from a DIFFERENT model fam
 
 Inputs provided: upstream PLAN.md and RESEARCH.md artifact content.
 
-Output a REVIEW.md artifact with frontmatter:
-```yaml
+Output directly (do NOT use write_file tool). Start with YAML frontmatter:
+
+---
 tof:
-  run_id: "<run_id>"
+  run_id: FILL WITH RUN ID
   phase: "review"
   schema_version: "0.1"
-  round: <round>
+  round: FILL WITH ROUND
   produced_by:
     adapter: "fake"
-    assigned_model: "<model>"
-    claimed_model: "<model>"
-    assigned_family: "<family>"
-    actual_family: "<family>"
+    assigned_model: FILL WITH MODEL
+    claimed_model: FILL WITH MODEL
+    assigned_family: FILL WITH FAMILY
+    actual_family: FILL WITH FAMILY
   inputs:
     - phase: "scout"
       path: "01-Scout.md"
-      sha256: "<sha256>"
+      sha256: FILL WITH SHA256
     - phase: "establish"
       path: "02-Establish.md"
-      sha256: "<sha256>"
+      sha256: FILL WITH SHA256
 review:
-  verdict: "<PASS|WEAKNESS_FOUND|BLOCKING>"
+  verdict: FILL WITH PASS|WEAKNESS FOUND|BLOCKING
   findings:
-    - type: "<design_flaw|security_issue|missing_edge_case|over_engineering|assumption_error>"
-      severity: "<high|medium|low>"
-      description: "<specific problem>"
+    - type: FILL WITH DESIGN FLAW|SECURITY ISSUE|MISSING EDGE CASE|OVER ENGINEERING|ASSUMPTION ERROR
+      severity: FILL WITH HIGH|MEDIUM|LOW
+      description: FILL WITH SPECIFIC PROBLEM
   blocking:
-    - "<must-fix item if BLOCKING>"
-```
+    - FILL WITH MUST-FIX ITEM IF BLOCKING
+---
 
-Replace `<placeholders>`. findings can be empty if verdict=PASS. blocking is required when verdict=BLOCKING. Output ONLY the .md file.
+Replace `FILL WITH PLACEHOLDERS`. findings can be empty if verdict=PASS. blocking is required when verdict=BLOCKING. Output ONLY the .md file.

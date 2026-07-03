@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run(run_dir: str, step_mode: bool = False) -> int:
+def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> int:
     """Orchestrate a TOF run to completion (or single step)."""
     rd = Path(run_dir).resolve()
     if not rd.exists():
@@ -31,6 +31,7 @@ def run(run_dir: str, step_mode: bool = False) -> int:
     tof_bin = _find_tof_bin()
     pipeline = _load_pipeline(tof_bin.parent)
     models_registry = _load_models(tof_bin.parent)
+    phase_order = list(pipeline.get("phases", {}).keys())
 
     max_iter = 20
     for _ in range(max_iter):
@@ -86,7 +87,12 @@ def run(run_dir: str, step_mode: bool = False) -> int:
 
         print(f"  → dispatching {next_phase} via {assigned_model} ...")
         try:
-            session_id = _dispatch_ot(tof_bin.parent, next_phase, assigned_model, rd, pipeline)
+            phase_idx = phase_order.index(next_phase) if next_phase in phase_order else 0
+            artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}.md"
+            artifact_path = rd / artifact_name
+            extra_context = task if (next_phase == "clarify" and task) else None
+            session_id = _dispatch_ot(tof_bin.parent, next_phase, assigned_model,
+                                     artifact_path, rd, pipeline, extra_context=extra_context)
         except RuntimeError as e:
             print(f"STOP — OT dispatch failed: {e}")
             return 1
@@ -140,9 +146,14 @@ def _find_tof_bin() -> Path:
 _SESSION_RE = re.compile(r"Session:\s+(\S+)")
 
 
-def _dispatch_ot(tof_dir: Path, phase: str, model: str, run_dir: Path,
-                 pipeline: Dict[str, Any]) -> str:
-    """Run hermes chat -q, parse session ID from output, write artifact to run_dir."""
+def _dispatch_ot(tof_dir: Path, phase: str, model: str, artifact_path: Path,
+                 run_dir: Path, pipeline: Dict[str, Any],
+                 extra_context: Optional[str] = None) -> str:
+    """Run hermes chat -q, wait for artifact to be written to artifact_path.
+    
+    The prompt instructs the model to write its output directly to the target
+    artifact path. The orchestrator reads from that path after OT completes.
+    """
     prompt_path = tof_dir / "phases" / phase / "prompt.md"
     if not prompt_path.exists():
         raise RuntimeError(f"prompt file not found: {prompt_path}")
@@ -154,7 +165,17 @@ def _dispatch_ot(tof_dir: Path, phase: str, model: str, run_dir: Path,
     if upstream:
         prompt += "\n\n## Upstream Artifacts\n\n" + upstream
 
-    # Determine provider from model — fallback to the model's known provider
+    # Inject task context for clarify phase
+    if extra_context:
+        prompt += f"\n\n## Task Description\n\n{extra_context}\n\nProduce your artifact based on the task above. Do NOT ask clarifying questions."
+
+    # Inject target file path
+    prompt += f"\n\nWrite your artifact to: {artifact_path}\nOutput the file content to stdout as well."
+
+    # Write prompt to temp file for hermes to read
+    prompt_file = run_dir / f".hermes_prompt_{phase}.txt"
+    prompt_file.write_text(prompt)
+
     provider = "deepseek" if model.startswith("deepseek") else "openrouter"
 
     cmd = [
@@ -163,50 +184,41 @@ def _dispatch_ot(tof_dir: Path, phase: str, model: str, run_dir: Path,
         "--model", model,
     ]
 
-    # Write prompt to temp file for hermes to read cleanly
-    prompt_file = run_dir / f".hermes_prompt_{phase}.txt"
-    prompt_file.write_text(prompt)
-
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=300,
         cwd=str(run_dir),
     )
 
-    output = proc.stdout
-    if not output:
-        output = proc.stderr
+    output = proc.stdout or proc.stderr
     if not output:
         raise RuntimeError(f"hermes chat produced no output (exit {proc.returncode})")
 
     # Extract session ID
     m = _SESSION_RE.search(output)
     if not m:
-        # Try to find session ID in any format
         session_match = re.search(r'\b\d{8}_\d{6}_[a-f0-9]+\b', output)
         if session_match:
             session_id = session_match.group(0)
         else:
-            # Write output for debugging and fail gracefully
             debug_file = run_dir / f".hermes_debug_{phase}.txt"
             debug_file.write_text(output)
             raise RuntimeError(f"cannot find session ID in output; wrote debug to {debug_file}")
     else:
         session_id = m.group(1)
 
-    # Derive artifact filename from phase order
-    phase_order = list(pipeline.get("phases", {}).keys())
-    phase_idx = phase_order.index(phase) if phase in phase_order else 0
-    artifact_name = f"{phase_idx:02d}-{phase.capitalize()}.md"
-    artifact_path = run_dir / artifact_name
-
-    # Strip ANSI escapes and box-drawing chars, extract model response
-    clean = _strip_ansi(output)
-    body = _extract_response_body(clean)
-    if not body:
-        body = clean  # fallback: use everything
-
-    artifact_path.write_text(body)
-    print(f"  wrote artifact: {artifact_path.name} ({len(body)} chars)")
+    # Read artifact from target path (model may have written it via write_file tool)
+    if artifact_path.exists():
+        size = artifact_path.stat().st_size
+        print(f"  wrote artifact: {artifact_path.name} ({size} chars)")
+    else:
+        # Fallback: capture stdout as artifact
+        clean = _strip_ansi(output)
+        body = _extract_response_body(clean)
+        if body:
+            artifact_path.write_text(body)
+            print(f"  wrote artifact from stdout: {artifact_path.name} ({len(body)} chars)")
+        else:
+            print(f"  WARNING: no artifact found at {artifact_path.name} and no stdout content")
 
     return session_id
 

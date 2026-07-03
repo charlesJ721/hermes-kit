@@ -65,6 +65,8 @@ phases:
     field_rules:
       scout.unknowns:
         min_items: 1
+      scout.implicit_dependencies:
+        min_items: 1
     verdict_field: scout.verdict
     verdicts:
       PASS:
