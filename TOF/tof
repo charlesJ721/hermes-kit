@@ -1106,6 +1106,12 @@ def lint_pipeline(override_pipeline: Optional[Path] = None) -> int:
             errors.append("model_freshness.max_staleness_days must be an integer")
         if mf.get("on_stale") not in ("warning", "blocking"):
             errors.append("model_freshness.on_stale must be 'warning' or 'blocking'")
+    vc = pipeline.get("verification_confidence")
+    if isinstance(vc, dict):
+        if not isinstance(vc.get("threshold"), (int, float)):
+            errors.append("verification_confidence.threshold must be a number")
+        if vc.get("on_low_confidence") not in ("info", "warning", "blocking"):
+            errors.append("verification_confidence.on_low_confidence must be 'info', 'warning', or 'blocking'")
 
     for name, cfg in phases:
         if name not in referenced and not cfg.get("optional") and name != phases[0][0]:

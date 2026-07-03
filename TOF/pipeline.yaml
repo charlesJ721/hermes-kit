@@ -22,6 +22,13 @@ model_freshness:
   # different model family, compromising the Review diversity guarantee.
   on_stale: warning
 
+# verification_confidence — reserved. P0 does not enforce; always "info".
+# Future: set on_low_confidence=blocking + threshold=0.9 to reject artifacts
+# whose SessionAuditAdapter-reported confidence is below threshold.
+verification_confidence:
+  threshold: 0.9
+  on_low_confidence: info   # "info" (no block) | "warning" | "blocking"
+
 # ---- Phase definitions ----
 
 phases:
