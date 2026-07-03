@@ -10,6 +10,9 @@ timeout_policy:
   max_retries: 3
   retry_interval_seconds: 60
   on_exhaustion: blocking_ex
+  # NOTE: timeout_policy governs HTTP call retries (model unresponsive).
+  # Phase-level retry (Review BLOCKING → Establish) is governed by
+  # per-phase retry.max_rounds, NOT by this policy.
 
 model_freshness:
   max_staleness_days: 30
