@@ -95,7 +95,7 @@ phases:
       - establish.rollback
       - establish.out_of_scope
       - establish.execution_mode
-    verdict_field: plan.verdict
+    verdict_field: establish.verdict
     verdicts:
       READY:
         next: review

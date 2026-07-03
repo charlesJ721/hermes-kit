@@ -34,6 +34,9 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
     phase_order = list(pipeline.get("phases", {}).keys())
 
     max_iter = 20
+    last_phase = None
+    last_phase_count = 0
+
     for _ in range(max_iter):
         receipt = _tof_validate(tof_bin, rd)
         status = receipt["validation"]["status"]
@@ -86,6 +89,17 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
             return 1
 
         print(f"  → dispatching {next_phase} via {assigned_model} ...")
+
+        # Loop guard: if dispatching same phase again without progress, stop
+        if next_phase == last_phase:
+            last_phase_count += 1
+            if last_phase_count >= 3:
+                print(f"STOP — dispatching {next_phase} repeatedly ({last_phase_count}x) without progress")
+                return 1
+        else:
+            last_phase = next_phase
+            last_phase_count = 0
+
         try:
             phase_idx = phase_order.index(next_phase) if next_phase in phase_order else 0
             artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}.md"
