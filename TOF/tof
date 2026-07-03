@@ -397,17 +397,27 @@ def produced_by(fm: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def resolve_family_for_artifact(art: Artifact, models: Dict[str, Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    """Return (family, error). Registry is authority; artifact actual_family must be consistent."""
     pb = produced_by(art.frontmatter)
     model_id = pb.get("assigned_model") or pb.get("claimed_model")
     if model_id and model_id not in models:
         return None, f"unknown model family for model_id={model_id}"
+
     actual_family = pb.get("actual_family")
-    if actual_family:
+    registry_family = models.get(model_id, {}).get("family") if model_id else None
+
+    if actual_family and registry_family:
+        if str(actual_family) != str(registry_family):
+            return None, (
+                f"model family mismatch: assigned_model={model_id} "
+                f"registry_family={registry_family} but artifact claims actual_family={actual_family}"
+            )
         return str(actual_family), None
-    if model_id:
-        family = models.get(model_id, {}).get("family")
-        if family:
-            return str(family), None
+
+    if registry_family:
+        return str(registry_family), None
+    if actual_family:
+        return str(actual_family), None  # registry unknown, trust artifact
     return None, "unknown model family"
 
 

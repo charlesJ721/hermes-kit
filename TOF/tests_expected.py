@@ -22,6 +22,9 @@ CASES = {
     "test-d-invalid-upstream-no-stale": ("PASS", [], {}),
     "test-e-self-reference": ("INVALID", [], {"input_linkage": "BLOCKING"}),
     "test-f-no-path-sha-match": ("PASS", [], {"input_linkage": "PASS"}),
+    # P0.2b fixtures
+    "test-g-family-mismatch": ("INVALID", [], {"model_policy": "BLOCKING"}),
+    "test-h-family-match": ("PASS", [], {"model_policy": "PASS"}),
 }
 
 failures = []
