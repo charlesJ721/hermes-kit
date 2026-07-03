@@ -59,6 +59,7 @@
   1. Report the fact (which model, what error, how many retries)
   2. Wait for a decision (retry / switch model / skip)
 - Do NOT self-execute the phase work. If you can't get the assigned model, you can't get the model diversity that justifies the pipeline.
+- **Timeout protocol:** max 3 retries at 60s intervals. If the assigned model cannot respond after 3 attempts, mark the phase as BLOCKING and escalate to Phase EX. Do not leave the pipeline hanging indefinitely.
 
 ---
 

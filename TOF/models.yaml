@@ -2,6 +2,11 @@
 # Used by tof validate to check model_policy constraints
 # Each model ID maps to a family for diversity verification.
 #
+# ⚠️  Model slugs expire. Run before each TOF session:
+#    curl -s "https://<provider-endpoint>/v1/models" | grep model-name
+#    Update freshness_checked_at when verified.
+#    If a slug is stale, tof validate will report "unknown model family" (INVALID).
+#
 # freshness_checked_at: ISO date when the model slug was last verified
 #   against the provider's /v1/models endpoint.
 # verification_method: how the model's identity is confirmed after dispatch

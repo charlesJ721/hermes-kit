@@ -41,6 +41,17 @@ N5: Verify (Model A + D)
 
 **Each node is an independent session.** No conversation history leaks between phases. Each node receives only the upstream .md file (2-5K tokens) plus its phase instructions (~2K tokens). Context window density ≥20% at all times.
 
+## Constraint Taxonomy
+
+Every constraint in TOF belongs to one of two categories:
+
+| Category | Label | Enforced by | Examples |
+|----------|-------|------------|----------|
+| **MECHANICAL** | 🔩 | `tof validate` (hard gate) | schema checks, input lineage, model family diversity, retry budget, verdict validation |
+| **BEHAVIORAL** | 📋 | Operator / Orchestrator discipline (not enforced by code) | STATE_LOCKER protocol, Orchestrator behavior boundaries, OT verification, Phase EX escalation |
+
+**Mechanical constraints** are reflected in pipeline.yaml and produce INVALID receipts when violated. **Behavioral constraints** are documented for correct operation but do not trigger automatic blocking. The distinction matters: TOF solves what it can with tools, and clearly documents what it cannot.
+
 ## The Pipeline
 
 ### Standard SERI (for L2-L3 engineering tasks)
