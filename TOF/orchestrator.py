@@ -29,6 +29,8 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
         rd.mkdir(parents=True)
 
     tof_bin = _find_tof_bin()
+    pipeline_path = tof_bin.parent / "pipeline.yaml"
+    models_path = tof_bin.parent / "models.yaml"
     pipeline = _load_pipeline(tof_bin.parent)
     models_registry = _load_models(tof_bin.parent)
     phase_order = list(pipeline.get("phases", {}).keys())
@@ -38,7 +40,7 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
     last_phase_count = 0
 
     for _ in range(max_iter):
-        receipt = _tof_validate(tof_bin, rd)
+        receipt = _tof_validate(tof_bin, rd, pipeline_path, models_path)
         status = receipt["validation"]["status"]
         phase = receipt["validation"].get("phase")
         next_allowed = receipt["validation"].get("next_allowed", [])
@@ -134,9 +136,10 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
 # Internal: tof validate invocation
 # ---------------------------------------------------------------------------
 
-def _tof_validate(tof_bin: Path, run_dir: Path) -> Dict[str, Any]:
+def _tof_validate(tof_bin: Path, run_dir: Path, pipeline_path: Path, models_path: Path) -> Dict[str, Any]:
     proc = subprocess.run(
-        [sys.executable, str(tof_bin), "validate", str(run_dir)],
+        [sys.executable, str(tof_bin), "validate", str(run_dir),
+         "--pipeline", str(pipeline_path), "--models", str(models_path)],
         capture_output=True, text=True, timeout=30,
     )
     if proc.returncode not in (0, 1):

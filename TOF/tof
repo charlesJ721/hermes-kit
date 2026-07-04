@@ -416,9 +416,9 @@ def resolve_family_for_artifact(art: Artifact, models: Dict[str, Dict[str, Any]]
 
     if registry_family:
         return str(registry_family), None
-    if actual_family:
-        return str(actual_family), None  # registry unknown, trust artifact
-    return None, "unknown model family"
+    # Safety: if model_id is not in registry, we CANNOT trust artifact self-reported actual_family.
+    # Artifact frontmatter is evidence, not authority — only adapter-verified facts can establish family.
+    return None, f"cannot determine model family: assigned_model={model_id} not in registry and no adapter facts available"
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +485,8 @@ def validate_schema(art: Artifact, phase_cfg: Dict[str, Any], reasons: List[str]
             reasons.append(f"missing or empty required field: {dotted}")
 
     # --- Echo detection: FILL WITH tokens remaining in frontmatter ---
-    _check_echo(art, reasons)
+    if _check_echo(art, reasons):
+        ok = False
 
     field_rules = phase_cfg.get("field_rules", {}) or {}
     if isinstance(field_rules, dict):
@@ -527,9 +528,11 @@ def validate_schema(art: Artifact, phase_cfg: Dict[str, Any], reasons: List[str]
     return "PASS" if ok else "BLOCKING"
 
 
-def _check_echo(art: Artifact, reasons: List[str]) -> None:
+def _check_echo(art: Artifact, reasons: List[str]) -> bool:
     """Detect echo: any frontmatter value containing 'FILL WITH' indicates the
-    model echoed the template back instead of filling in placeholders."""
+    model echoed the template back instead of filling in placeholders.
+    Returns True if echoes found (validation should fail)."""
+    found: List[str] = []
     def _scan(obj: Any, path: str = "") -> None:
         if isinstance(obj, dict):
             for k, v in obj.items():
@@ -538,8 +541,11 @@ def _check_echo(art: Artifact, reasons: List[str]) -> None:
             for i, item in enumerate(obj):
                 _scan(item, f"{path}[{i}]")
         elif isinstance(obj, str) and "FILL WITH" in obj:
-            reasons.append(f"echo: {path}=\"{obj[:80]}\"")
+            found.append(f"echo: {path}=\"{obj[:80]}\"")
     _scan(art.frontmatter)
+    for e in found:
+        reasons.append(e)
+    return len(found) > 0
 
 
 def derive_transition(art: Artifact, phase_cfg: Dict[str, Any],
