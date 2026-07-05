@@ -1,43 +1,132 @@
-# Task Orchestration Framework (TOF)
+# TOF — Task Orchestration Framework
 
-> A multi-model, multi-phase agent orchestration pipeline that prevents the single most expensive failure mode in LLM agents: **the agent doing everything itself with one model.**
+[![TOF v4](https://img.shields.io/badge/TOF-v4-blue)](https://github.com/charlesJ721/hermes-kit/tree/main/TOF)
+[![Tests](https://img.shields.io/badge/tests-18%20PASS-brightgreen)]()
+[![Pipeline](https://img.shields.io/badge/lint-0%20errors%200%20warnings-success)]()
+[![License](https://img.shields.io/badge/license-MIT-orange)]()
 
-**What TOF solves:** When you give an AI agent a non-trivial task — a refactor, a system diagnosis, an architectural decision — the agent's default instinct is to do everything itself: plan, code, review, verify. This is fast but brittle. Every step inherits the same model's blind spots. No independent verification ever happens. Bad assumptions compound.
+> **Multi-model pipeline with built-in self-audit. 4 files of code, 18 test fixtures, zero mocks. Fail-closed by default.**
 
-TOF enforces a different default: **orchestrate, don't execute.** For any non-trivial task, TOF routes the work through a five-phase pipeline where each phase uses a different model, runs in an isolated context, and produces a structured contract consumed by the next phase.
+TOF routes complex AI tasks through a 7-phase pipeline where each phase uses a different model, runs in an isolated context, and produces a structured artifact that gets independently validated. One broken phase → all downstream phases marked INVALID. Nothing rots silently.
 
-## Quick Start
+---
 
-```bash
-# 1. Classify your task
-Task: "Refactor the auth module to support OIDC"
-→ Domain: engineering  |  Complexity: L2 (3+ files)  |  Cost of failure: medium
-→ Route: Standard SERI (5-phase full pipeline)
+## What it does
 
-# 2. Run the pipeline
-Phase 0 — Clarify   (model A): Define scope, success criteria, exclusions
-Phase 1 — Scout     (model B): Research affected files, risks, unknowns
-Phase 2 — Establish (model C): Design the solution, write PLAN.md
-Phase 3 — Review    (model D): Adversarial review, find blind spots
-Phase 4 — Implement (model C): Execute per approved plan
-Phase 5 — Verify    (model A): Cross-check against plan
+```
+Your task: "Refactor the auth module to support OIDC"
+
+  Clarify (GPT-5.5)     → 00-Clarify.md    scope, exclusions, success criteria
+  Scout   (Claude Opus) → 01-Scout.md      affected files, risks, unknowns
+  Establish (GPT-5.5)   → 02-Establish.md  solution design, PLAN.md
+  Review  (Gemini)      → 03-Review.md     adversarial review, BLOCKING findings
+  Implement (GPT-5.5)   → code changes     per approved plan
+  Verify  (DeepSeek)    → 05-Verify.md     cross-check against plan
+  Deposition            → knowledge archive
+
+  Every artifact validated by tof validate:
+  schema → input lineage → staleness → model family → session audit → cascade
 ```
 
-## Core Concepts
+Each phase runs as an isolated OT subprocess. No shared context. No model-sharing blind spots.
 
-- **Five-phase pipeline** — Clarify → Scout → Establish → Review → Implement → Verify (+ Knowledge Deposition)
-- **Multi-model orchestration** — Each phase assigned to the model with the strongest benchmark for that cognitive load
-- **Isolated phase contexts** — Each phase runs in a fresh session with only the upstream contract (.md file), preventing context poisoning
-- **Quality gates** — Each phase has mandatory fields; missing fields block progression
-- **STATE_LOCKER protocol** — A state-machine prefix that forces the orchestrator to declare its phase, next action, and self-warning before every turn
+---
 
-## Files
+## One minute
 
-| File | What |
-|------|------|
-| `CORE_CONCEPTS.md` | The what and why — state locker, pipeline, routing table |
-| `PHASES.md` | Full detail of each phase — inputs, outputs, quality gates |
-| `OT.md` | Orchestrator Threads — how to achieve true multi-model routing |
-| `MODEL_ASSIGNMENT.md` | Which model for which phase, and why |
-| `FAILURE_MODES.md` | Every known failure mode that shaped this framework |
-| `APPENDIX.md` | Glossary, changelog, external references |
+```bash
+# Install
+pip install pyyaml
+git clone https://github.com/charlesJ721/hermes-kit.git
+cd hermes-kit/TOF
+
+# Validate a sample pipeline run
+./tof validate test-fixtures/test-smoke-full-pipeline \
+  --pipeline pipeline.yaml --models models.yaml
+
+# Check your own pipeline definition
+./tof lint-pipeline --pipeline pipeline.yaml
+
+# Run all 18 test fixtures
+python3 tests_expected.py
+# → all expected TOF fixture semantics passed
+```
+
+---
+
+## The five validation checks
+
+Every artifact goes through five independent checks before passing the gate:
+
+| Check | What it catches |
+|-------|----------------|
+| **schema** | Missing required fields, wrong types, invalid frontmatter |
+| **input linkage** | SHA256 mismatch between declared upstream and actual artifact |
+| **staleness** | Downstream artifact that wasn't rebuilt after upstream changed |
+| **model family** | Artifact claims model family X but registry says Y |
+| **session audit** | Agent log shows a different model ran than what was assigned |
+
+One INVALID check → all downstream artifacts cascade to INVALID. Fail-closed.
+
+---
+
+## Model diversity (SERI audit)
+
+TOF ships with a self-audit pipeline (SERI) that verifies the framework against itself using 4 different model families:
+
+| Phase | Model | Family | Audit result |
+|-------|-------|--------|-------------|
+| Scout | Claude Opus 4.8 | claude | verified_match |
+| Establish | GPT-5.5 | gpt | verified_match |
+| Review | Gemini 3.1 Pro | gemini | verified_match |
+| Verify | DeepSeek v4 Pro | deepseek | verified_match |
+
+**Zero overlapping findings across 4 families.** `family_must_differ` works.
+
+---
+
+## Why not LangChain / CrewAI / AutoGen
+
+Those frameworks ask "what should the agent do next?" — TOF asks **"who should do this, and can we prove they actually did it?"**
+
+| | LangChain/CrewAI | TOF |
+|---|:-:|:-:|
+| Multi-model pipeline | ✅ | ✅ |
+| Independent phase isolation | ❌ shared context | ✅ isolated OT subprocesses |
+| Built-in validation gate | ❌ manual review | ✅ 5 automatic checks |
+| Session audit (model identity) | ❌ | ✅ agent.log parser |
+| Fail-closed by default | ❌ | ✅ cascade invalidation |
+| Test fixtures | varies | ✅ 18, all PASS |
+| Dependencies | 30+ packages | 1 (pyyaml) |
+
+---
+
+## Project structure
+
+```
+TOF/
+├── tof                         # Validator (1324 lines): 5 checks + cascade
+├── orchestrator.py             # State machine: OT dispatch, receipt loop
+├── session_audit_adapter.py    # Agent.log parser: model identity verification
+├── model_registry_adapter.py   # Provider endpoint checker: slug freshness
+├── pipeline.yaml               # 7-phase DAG + transition rules + policies
+├── models.yaml                 # 7 models × 4 families
+├── tests_expected.py           # 18 fixture semantics validator
+├── test-fixtures/              # 18 synthetic pipeline runs
+├── phases/                     # Prompt templates per phase
+└── IMPLEMENTATION_STATUS.md    # What's built, what's pending, known gaps
+```
+
+---
+
+## Philosophy
+
+TOF was not designed from first principles. Every mechanism — the 5 checks, cascade invalidation, session audit, model family enforcement — was added to fix a real failure observed during development. The failures are documented alongside the fixes.
+
+> **"An unverifiable pipeline is a fake pipeline."**
+
+---
+
+## License
+
+MIT
