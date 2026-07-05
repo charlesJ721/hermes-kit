@@ -865,6 +865,19 @@ def apply_session_fallback(artifacts: List[Artifact], run_dir: Path,
                 result["checks"]["session_audit"] = "PASS"
                 continue
             elif outcome in ("verified_mismatch", "unknown_model"):
+                # Provider-level fallback (e.g., OpenRouter 400→other model)
+                # is not a code defect — when allowed by policy, downgrade
+                # from INVALID to PASS with a WARNING annotation.
+                if (meta.get("fallback_detected") is True
+                        and pipeline.get("timeout_policy", {}).get("allow_provider_fallback") is True):
+                    result["checks"]["session_audit"] = "WARNING"
+                    result.setdefault("reasons", []).append(
+                        f"session audit: provider fallback detected — "
+                        f"assigned={meta.get('assigned_model', '?')} "
+                        f"actual={meta.get('actual_model', '?')} "
+                        f"(allowed by allow_provider_fallback policy)"
+                    )
+                    continue
                 result["checks"]["session_audit"] = "BLOCKING"
                 result["status"] = "INVALID"
                 result.setdefault("reasons", []).append(

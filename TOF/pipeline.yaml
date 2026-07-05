@@ -10,6 +10,11 @@ timeout_policy:
   max_retries: 3
   retry_interval_seconds: 60
   on_exhaustion: blocking_ex
+  # When true, provider-level fallback (e.g., OpenRouter routing a request
+  # to a different model on 400 error) is treated as WARNING rather than
+  # INVALID. Default false: any detected fallback invalidates the artifact.
+  # Set true when using providers known to perform automatic failover.
+  allow_provider_fallback: false
   # NOTE: timeout_policy governs HTTP call retries (model unresponsive).
   # Phase-level retry (Review BLOCKING → Establish) is governed by
   # per-phase retry.max_rounds, NOT by this policy.

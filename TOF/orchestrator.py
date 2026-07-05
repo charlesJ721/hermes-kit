@@ -30,11 +30,14 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
 
     tof_bin = _find_tof_bin()
     snap_dir = rd / ".tof"
-    pipeline_path = snap_dir / "pipeline.yaml" if (snap_dir / "pipeline.yaml").exists() else tof_bin.parent / "pipeline.yaml"
-    models_path = snap_dir / "models.yaml" if (snap_dir / "models.yaml").exists() else tof_bin.parent / "models.yaml"
-    pipeline = _load_pipeline(tof_bin.parent)
-    models_registry = _load_models(tof_bin.parent)
+    # Snapshot live config into immutable run directory FIRST,
+    # then load loop control from snapshot — prevents split-brain
+    # between orchestrator (loop driver) and validator (gate judge).
     _snapshot_configs(rd, tof_bin.parent)
+    pipeline_path = snap_dir / "pipeline.yaml"
+    models_path = snap_dir / "models.yaml"
+    pipeline = _load_pipeline(snap_dir)
+    models_registry = _load_models(snap_dir)
     phase_order = list(pipeline.get("phases", {}).keys())
 
     max_iter = 20
@@ -205,6 +208,12 @@ def _dispatch_ot(tof_dir: Path, phase: str, model: str, artifact_path: Path,
     provider = model_cfg.get("provider", "openrouter")
     provider_model_id = model_cfg.get("provider_model_id", model)
     
+    # Pre-dispatch: verify model slug freshness against provider
+    # Stale slugs cause silent provider fallback (e.g., Gemini 400→DeepSeek),
+    # creating INVALID trust-chain breaks downstream. Catching staleness
+    # before dispatch is cheaper than session audit rejection.
+    _check_model_freshness(model, tof_dir)
+    
     prompt_path = tof_dir / "phases" / phase / "prompt.md"
     if not prompt_path.exists():
         raise RuntimeError(f"prompt file not found: {prompt_path}")
@@ -333,6 +342,46 @@ def _extract_response_body(text: str) -> str:
     # Remove leading hermes header lines
     body = re.sub(r'^.*Hermes\s+Agent.*\n', '', body)
     return body.strip()
+
+
+def _check_model_freshness(model: str, tof_dir: Path) -> None:
+    """Verify model slug is fresh before dispatch.
+
+    Calls ModelRegistryAdapter to check provider endpoint. Stale models
+    with on_stale=blocking raise RuntimeError. Stale models with
+    on_stale=warning log but allow dispatch (operator decision).
+
+    Skips freshness check if model_registry_adapter.py is not importable
+    (graceful degradation — registry freshness is advisory, not blocking
+    by default).
+    """
+    try:
+        from model_registry_adapter import check_model as check_freshness
+    except ImportError:
+        return  # adapter not available, skip
+
+    models_yaml = tof_dir / "models.yaml"
+    result = check_freshness(model, models_yaml)
+
+    if result["status"] == "fresh":
+        return
+    elif result["status"] == "network_error":
+        print(f"  WARNING: model freshness check failed (network): {result.get('error')}")
+        return
+    elif result["status"] == "stale":
+        msg = f"stale model slug: {result.get('error', 'unknown')}"
+        # Check pipeline policy for on_stale behavior
+        try:
+            import yaml
+            pipeline = yaml.safe_load((tof_dir / "pipeline.yaml").read_text()) or {}
+            on_stale = pipeline.get("model_freshness", {}).get("on_stale", "warning")
+        except Exception:
+            on_stale = "warning"
+
+        if on_stale == "blocking":
+            raise RuntimeError(f"Cannot dispatch {model}: {msg}")
+        else:
+            print(f"  WARNING: {msg}")
 
 
 # ---------------------------------------------------------------------------

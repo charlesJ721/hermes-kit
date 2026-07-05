@@ -127,11 +127,17 @@ _CALL_LINE_RE = re.compile(
 
 
 def _grep_session(log_path: Path, session_id: str) -> list[str]:
-    """Return all log lines containing session_id and 'API call'."""
+    """Return all log lines containing the exact session_id bracket and 'API call'.
+    
+    Uses bracket-delimited match (e.g., '[20260705_151052_546f8f]') rather than
+    bare substring, preventing false matches from partial session_id collisions
+    or session_id appearing inside other fields (timestamps, cache stats, etc.).
+    """
+    bracket_pattern = f"[{session_id}]"
     result: list[str] = []
     with log_path.open("r", encoding="utf-8", errors="replace") as f:
         for line in f:
-            if session_id in line and "API call" in line:
+            if bracket_pattern in line and "API call" in line:
                 result.append(line.rstrip("\n"))
     return result
 
