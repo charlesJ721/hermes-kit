@@ -29,10 +29,12 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
         rd.mkdir(parents=True)
 
     tof_bin = _find_tof_bin()
-    pipeline_path = tof_bin.parent / "pipeline.yaml"
-    models_path = tof_bin.parent / "models.yaml"
+    snap_dir = rd / ".tof"
+    pipeline_path = snap_dir / "pipeline.yaml" if (snap_dir / "pipeline.yaml").exists() else tof_bin.parent / "pipeline.yaml"
+    models_path = snap_dir / "models.yaml" if (snap_dir / "models.yaml").exists() else tof_bin.parent / "models.yaml"
     pipeline = _load_pipeline(tof_bin.parent)
     models_registry = _load_models(tof_bin.parent)
+    _snapshot_configs(rd, tof_bin.parent)
     phase_order = list(pipeline.get("phases", {}).keys())
 
     max_iter = 20
@@ -104,11 +106,18 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
 
         try:
             phase_idx = phase_order.index(next_phase) if next_phase in phase_order else 0
-            artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}.md"
+            # Determine current round: count existing artifacts for this phase
+            existing_rounds = len(list(rd.glob(f"{phase_idx:02d}-{next_phase.capitalize()}*.md")))
+            current_round = existing_rounds + 1
+            if current_round == 1:
+                artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}.md"
+            else:
+                artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}-r{current_round}.md"
             artifact_path = rd / artifact_name
             extra_context = task if (next_phase == "clarify" and task) else None
             session_id = _dispatch_ot(tof_bin.parent, next_phase, assigned_model,
-                                     artifact_path, rd, pipeline, extra_context=extra_context)
+                                     artifact_path, rd, pipeline, models_registry,
+                                     extra_context=extra_context)
         except RuntimeError as e:
             print(f"STOP — OT dispatch failed: {e}")
             return 1
@@ -118,13 +127,25 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
             from session_audit_adapter import read_session as audit
 
             log_path = os.path.expanduser("~/.hermes/logs/agent.log")
-            result = audit(session_id, log_path, assigned_model, models_registry)
+            outcome, result = audit(session_id, log_path, assigned_model, models_registry)
             _write_metadata(rd, next_phase, session_id, result)
             print(f"  metadata: actual={result['actual_model']} "
-                  f"fallback={result['fallback_detected']} "
+                  f"outcome={outcome.value} "
                   f"confidence={result['verification_confidence']}")
         except Exception as e:
-            print(f"  WARNING: session audit failed ({e}), continuing without metadata")
+            print(f"  WARNING: session audit failed ({e}), continuing")
+            # Write EXCEPTION metadata so validator knows audit was attempted
+            _write_metadata(rd, next_phase, session_id, {
+                "actual_model": None,
+                "actual_family": None,
+                "fallback_detected": None,
+                "provider": None,
+                "latency_ms": None,
+                "verification_confidence": 0.0,
+                "method": "exception",
+                "outcome": "exception",
+                "exception": str(e),
+            })
 
         time.sleep(0.5)
 
@@ -165,17 +186,35 @@ _SESSION_RE = re.compile(r"Session:\s+(\S+)")
 
 def _dispatch_ot(tof_dir: Path, phase: str, model: str, artifact_path: Path,
                  run_dir: Path, pipeline: Dict[str, Any],
+                 models_registry: Dict[str, Dict[str, Any]],
                  extra_context: Optional[str] = None) -> str:
     """Run hermes chat -q, wait for artifact to be written to artifact_path.
     
     The prompt instructs the model to write its output directly to the target
     artifact path. The orchestrator reads from that path after OT completes.
     """
+    # Pre-dispatch: validate model slug against models.yaml
+    if model not in models_registry:
+        available = ', '.join(sorted(models_registry.keys()))
+        raise RuntimeError(
+            f"model '{model}' not found in models.yaml. "
+            f"Available: {available}"
+        )
+    
+    model_cfg = models_registry[model]
+    provider = model_cfg.get("provider", "openrouter")
+    provider_model_id = model_cfg.get("provider_model_id", model)
+    
     prompt_path = tof_dir / "phases" / phase / "prompt.md"
     if not prompt_path.exists():
         raise RuntimeError(f"prompt file not found: {prompt_path}")
 
     prompt = prompt_path.read_text()
+
+    # Preprocess template placeholders: replace known FILL WITH tokens
+    # with concrete values before OT dispatch. Content FILL WITH tokens
+    # become {{MARKER}} templates that models can safely fill in.
+    prompt = _preprocess_prompt(prompt, run_dir, phase, model, model_cfg)
 
     # Append upstream artifact context
     upstream = _build_upstream_context(run_dir, phase, pipeline)
@@ -193,18 +232,41 @@ def _dispatch_ot(tof_dir: Path, phase: str, model: str, artifact_path: Path,
     prompt_file = run_dir / f".hermes_prompt_{phase}.txt"
     prompt_file.write_text(prompt)
 
-    provider = "deepseek" if model.startswith("deepseek") else "openrouter"
-
     cmd = [
         "hermes", "chat", "-q", prompt,
         "--provider", provider,
-        "--model", model,
+        "--model", provider_model_id,
     ]
 
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=300,
-        cwd=str(run_dir),
-    )
+    # Read dispatch timeout and retry policy from pipeline config
+    dispatch_timeout = int(pipeline.get("dispatch_timeout_seconds", 300))
+    timeout_policy = pipeline.get("timeout_policy", {})
+    max_retries = int(timeout_policy.get("max_retries", 0))
+    retry_interval = int(timeout_policy.get("retry_interval_seconds", 60))
+
+    proc = None
+    for attempt in range(max_retries + 1):
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=dispatch_timeout,
+                cwd=str(run_dir),
+            )
+            break
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries:
+                print(f"  timeout (attempt {attempt+1}/{max_retries+1}), "
+                      f"retrying in {retry_interval}s...")
+                time.sleep(retry_interval)
+                continue
+            # Retry budget exhausted — write stub artifact and metadata
+            _write_timeout_exhausted_stub(artifact_path, run_dir, phase, model, dispatch_timeout)
+            raise RuntimeError(
+                f"OT dispatch timed out after {max_retries+1} attempts "
+                f"({dispatch_timeout}s each) for phase '{phase}'"
+            )
+
+    if proc is None:
+        raise RuntimeError(f"OT dispatch failed for phase '{phase}': no process result")
 
     output = proc.stdout or proc.stderr
     if not output:
@@ -236,6 +298,9 @@ def _dispatch_ot(tof_dir: Path, phase: str, model: str, artifact_path: Path,
             print(f"  wrote artifact from stdout: {artifact_path.name} ({len(body)} chars)")
         else:
             print(f"  WARNING: no artifact found at {artifact_path.name} and no stdout content")
+
+    # Inject mechanical metadata (SHA256, model identity)
+    _inject_artifact_shas(artifact_path, run_dir, pipeline, phase, model, model_cfg)
 
     return session_id
 
@@ -304,6 +369,96 @@ def _build_upstream_context(run_dir: Path, phase: str, pipeline: Dict[str, Any])
 # Internal: metadata
 # ---------------------------------------------------------------------------
 
+def _inject_artifact_shas(artifact_path: Path, run_dir: Path,
+                          pipeline: Dict[str, Any], phase: str,
+                          model: str, model_cfg: Dict[str, Any]) -> None:
+    """Post-process artifact: replace placeholder SHA256 with real values.
+
+    Models in OT subprocesses cannot access upstream artifact files, so they
+    fill in dummy SHA256 values. The orchestrator computes the real SHA256
+    for each upstream input and injects them into the artifact frontmatter.
+    Only injects for inputs declared in pipeline.yaml for this phase.
+    """
+    if not artifact_path.exists():
+        return
+    try:
+        import hashlib
+        import yaml
+        text = artifact_path.read_text()
+        if not text.startswith("---"):
+            return
+        # Line-aware frontmatter parsing (matches tof.parse_frontmatter)
+        lines = text.split('\n')
+        if lines[0].strip() != "---":
+            return
+        end_idx = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                end_idx = i
+                break
+        if end_idx is None:
+            return
+        frontmatter_str = '\n'.join(lines[1:end_idx])
+        body = '\n'.join(lines[end_idx + 1:])
+        fm = yaml.safe_load(frontmatter_str) or {}
+
+        # Determine expected upstream inputs from pipeline config
+        phase_cfg = pipeline.get("phases", {}).get(phase, {})
+        required_inputs = phase_cfg.get("inputs", {}).get("required", [])
+
+        # Inject assigned_model / assigned_family from models.yaml
+        tof_section = fm.get("tof", {})
+        if isinstance(tof_section, dict):
+            produced = tof_section.get("produced_by", {})
+            if isinstance(produced, dict):
+                produced["assigned_model"] = model
+                produced["assigned_family"] = model_cfg.get("family", "unknown")
+
+            # Fix SHA256 for each input
+            inputs = tof_section.get("inputs") or []
+            injected = 0
+            for inp in inputs:
+                if not isinstance(inp, dict):
+                    continue
+                path_str = inp.get("path") or ""
+                inp_phase = inp.get("phase") or ""
+
+                # Only inject for phases declared as required inputs
+                if inp_phase not in required_inputs:
+                    continue
+
+                # Resolve safely: only within run_dir, no traversal
+                try:
+                    upstream_path = (run_dir / path_str).resolve()
+                    if not str(upstream_path).startswith(str(run_dir.resolve())):
+                        print(f"  WARNING: input path '{path_str}' escapes run_dir, skipping SHA injection")
+                        continue
+                except (ValueError, OSError):
+                    continue
+
+                if upstream_path.exists() and upstream_path.is_file():
+                    sha = hashlib.sha256(upstream_path.read_bytes()).hexdigest()
+                    inp["sha256"] = sha
+                    injected += 1
+                elif inp_phase in required_inputs:
+                    raise RuntimeError(
+                        f"Required upstream '{path_str}' for phase {inp_phase} not found in {run_dir}. "
+                        f"Cannot compute SHA256 for trust chain."
+                    )
+                else:
+                    print(f"  WARNING: upstream '{path_str}' for phase {inp_phase} not found — keeping model-provided SHA")
+
+            if injected:
+                # Rebuild frontmatter YAML
+                new_fm = yaml.dump(fm, default_flow_style=False, allow_unicode=True,
+                                  sort_keys=False)
+                new_text = "---\n" + new_fm.strip() + "\n---\n" + body
+                artifact_path.write_text(new_text)
+                print(f"  injected {injected} SHA256(s) into {artifact_path.name}")
+
+    except Exception as e:
+        print(f"  WARNING: SHA injection failed for {artifact_path.name}: {e}")
+
 def _write_metadata(run_dir: Path, phase: str, session_id: str,
                     result: Dict[str, Any]) -> None:
     """Write session-metadata.json alongside artifacts."""
@@ -322,6 +477,134 @@ def _write_metadata(run_dir: Path, phase: str, session_id: str,
         "verification_method": result["method"],
     }
     path.write_text(json.dumps(payload, indent=2))
+
+
+def _write_timeout_exhausted_stub(artifact_path: Path, run_dir: Path,
+                                   phase: str, model: str,
+                                   dispatch_timeout: int) -> None:
+    """Write a stub INVALID artifact when retry budget is exhausted."""
+    import yaml
+    stub = {
+        "tof": {
+            "run_id": run_dir.name,
+            "phase": phase,
+            "schema_version": "0.1",
+            "round": 1,
+            "produced_by": {
+                "adapter": "fake",
+                "assigned_model": model,
+                "claimed_model": model,
+                "assigned_family": "unknown",
+                "actual_family": "unknown",
+            },
+            "inputs": [],
+        },
+        phase: {
+            "verdict": "TIMEOUT_EXHAUSTED",
+            "reason": f"OT dispatch timed out after all retries ({dispatch_timeout}s per attempt)",
+        },
+    }
+    content = "---\n" + yaml.dump(stub, default_flow_style=False,
+                                   allow_unicode=True, sort_keys=False).strip() + "\n---\n"
+    artifact_path.write_text(content)
+    print(f"  wrote timeout stub: {artifact_path.name}")
+    _write_metadata(run_dir, phase, "timeout-exhausted", {
+        "actual_model": None,
+        "actual_family": None,
+        "fallback_detected": None,
+        "provider": None,
+        "latency_ms": None,
+        "verification_confidence": 0.0,
+        "method": "timeout_exhausted",
+    })
+
+
+def _write_unverified_metadata(run_dir, phase, session_id, assigned_model, reason):
+    """Write metadata when session audit itself fails (e.g., log unreadable).
+
+    fallback_detected=None means "audit could not determine" — distinguished
+    from False (verified no fallback) and True (fallback confirmed).
+    """
+    path = run_dir / f".session-metadata-{phase}.json"
+    payload = {
+        "phase": phase,
+        "session_id": session_id,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "assigned_model": assigned_model,
+        "actual_model": None,
+        "actual_family": None,
+        "fallback_detected": None,
+        "provider": None,
+        "latency_ms": None,
+        "verification_confidence": 0.0,
+        "verification_method": "unverified",
+        "unverified_reason": reason,
+    }
+    path.write_text(json.dumps(payload, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Internal: prompt preprocessing
+# ---------------------------------------------------------------------------
+
+def _preprocess_prompt(prompt: str, run_dir: Path, phase: str,
+                        model: str, model_cfg: Dict[str, Any]) -> str:
+    """Replace FILL WITH placeholders before OT dispatch.
+
+    Known metadata placeholders get concrete values. Content placeholders
+    become {{MARKER}} templates that models can safely fill in without
+    triggering echo detection.
+    """
+    # Known metadata — replace with concrete values
+    prompt = prompt.replace("FILL WITH RUN ID", run_dir.name)
+    prompt = prompt.replace("FILL WITH ROUND NUMBER", "1")
+    prompt = prompt.replace("FILL WITH MODEL NAME", model)
+    prompt = prompt.replace("FILL WITH FAMILY", model_cfg.get("family", "unknown"))
+
+    # SHA placeholders — mark for post-dispatch injection
+    prompt = re.sub(
+        r'FILL WITH SHA256 OF \w+ ARTIFACT',
+        '{{SHA_WILL_BE_INJECTED}}',
+        prompt, flags=re.IGNORECASE
+    )
+
+    # Remaining FILL WITH — convert to safe template markers
+    # FILL WITH PASS|FAIL → {{FIELD: PASS|FAIL}}
+    prompt = re.sub(
+        r'FILL WITH ([A-Z_| ]+)',
+        r'{{FIELD: \1}}',
+        prompt
+    )
+    # FILL WITH <descriptive text> → {{FIELD: descriptive text}}
+    prompt = re.sub(
+        r'FILL WITH ([A-Z][A-Za-z ]+)',
+        r'{{FIELD: \1}}',
+        prompt
+    )
+    # Catch-all: any remaining isolated FILL WITH
+    prompt = prompt.replace("FILL WITH", "{{FIELD}}")
+
+    return prompt
+
+
+# ---------------------------------------------------------------------------
+# Internal: config snapshot
+# ---------------------------------------------------------------------------
+
+def _snapshot_configs(run_dir: Path, tof_dir: Path) -> None:
+    """Snapshot pipeline.yaml and models.yaml into run_dir/.tof/
+
+    This ensures the run uses an immutable config snapshot, preventing
+    mid-run config drift from invalidating the trust chain.
+    """
+    import shutil
+
+    snap_dir = run_dir / ".tof"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    for fname in ("pipeline.yaml", "models.yaml"):
+        src = tof_dir / fname
+        if src.exists():
+            shutil.copy2(src, snap_dir / fname)
 
 
 # ---------------------------------------------------------------------------

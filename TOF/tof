@@ -91,8 +91,9 @@ def load_yaml_file(path: Path) -> Dict[str, Any]:
 def candidate_config_paths(run_dir: Optional[Path], filename: str) -> List[Path]:
     paths: List[Path] = []
     if run_dir is not None:
-        paths.append((run_dir / filename).resolve())       # run dir itself (fixture-local)
-        paths.append((run_dir / ".." / filename).resolve())  # parent dir
+        paths.append((run_dir / ".tof" / filename).resolve())   # snapshot (highest priority)
+        paths.append((run_dir / filename).resolve())              # run dir itself (fixture-local)
+        paths.append((run_dir / ".." / filename).resolve())      # parent dir
     paths.append((Path.cwd() / filename).resolve())
     tof_dir = os.environ.get("TOF_DIR")
     if tof_dir:
@@ -529,9 +530,12 @@ def validate_schema(art: Artifact, phase_cfg: Dict[str, Any], reasons: List[str]
 
 
 def _check_echo(art: Artifact, reasons: List[str]) -> bool:
-    """Detect echo: any frontmatter value containing 'FILL WITH' indicates the
-    model echoed the template back instead of filling in placeholders.
-    Returns True if echoes found (validation should fail)."""
+    """Detect echo: any frontmatter value containing unreplaced template markers.
+
+    After _preprocess_prompt, legitimate templates become {{FIELD: ...}} or
+    {{SHA_WILL_BE_INJECTED}} markers. If these survive into the artifact
+    frontmatter, the model echoed the template back instead of filling it in.
+    """
     found: List[str] = []
     def _scan(obj: Any, path: str = "") -> None:
         if isinstance(obj, dict):
@@ -540,7 +544,7 @@ def _check_echo(art: Artifact, reasons: List[str]) -> bool:
         elif isinstance(obj, list):
             for i, item in enumerate(obj):
                 _scan(item, f"{path}[{i}]")
-        elif isinstance(obj, str) and "FILL WITH" in obj:
+        elif isinstance(obj, str) and ("{{FIELD:" in obj or "{{SHA_" in obj):
             found.append(f"echo: {path}=\"{obj[:80]}\"")
     _scan(art.frontmatter)
     for e in found:
@@ -813,6 +817,114 @@ def apply_stale_to_all(artifacts: List[Artifact], by_phase: Dict[str, List[Artif
             result["reasons"].extend(s_reasons)
 
 
+def apply_session_fallback(artifacts: List[Artifact], run_dir: Path,
+                           artifact_results: Dict[str, Any],
+                           pipeline: Dict[str, Any]) -> None:
+    """Read .session-metadata-*.json files and apply outcome-driven validation.
+
+    Outcome mapping:
+    - verified_match → no action (trust chain intact)
+    - verified_mismatch / unknown_model → INVALID (trust broken)
+    - unverified / unavailable / exception → BLOCKING (cannot verify)
+    - no metadata file → BLOCKING (audit gap)
+
+    This is fail-closed: any non-verified_match outcome blocks or invalidates.
+    
+    Exemption: phases with approval_policy='always' (e.g. clarify) skip audit
+    because they are human-produced, not OT-dispatched.
+    """
+    phases_cfg = pipeline.get("phases", {})
+    
+    for art in artifacts:
+        if art.sha256 not in artifact_results:
+            continue
+        result = artifact_results[art.sha256]
+        if result.get("status") == "INVALID":
+            continue
+        
+        # Exempt human-produced phases from session audit
+        phase_cfg = phases_cfg.get(art.phase, {})
+        if phase_cfg.get("approval_policy") == "always":
+            result["checks"]["session_audit"] = "NA"
+            continue
+        
+        meta_path = run_dir / f".session-metadata-{art.phase}.json"
+        if not meta_path.exists():
+            result["checks"]["session_audit"] = "BLOCKING"
+            result["status"] = "BLOCKING"
+            result.setdefault("reasons", []).append(
+                f"session audit: no metadata file for phase '{art.phase}' — "
+                f"audit never ran or metadata was lost"
+            )
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+            outcome = meta.get("outcome", "unverified")
+
+            if outcome == "verified_match":
+                result["checks"]["session_audit"] = "PASS"
+                continue
+            elif outcome in ("verified_mismatch", "unknown_model"):
+                result["checks"]["session_audit"] = "BLOCKING"
+                result["status"] = "INVALID"
+                result.setdefault("reasons", []).append(
+                    f"session audit: {outcome} — "
+                    f"assigned={meta.get('assigned_model', '?')} "
+                    f"actual={meta.get('actual_model', '?')}"
+                )
+            else:
+                # unverified, unavailable, exception, or unknown value
+                result["checks"]["session_audit"] = "BLOCKING"
+                result["status"] = "BLOCKING"
+                result.setdefault("reasons", []).append(
+                    f"session audit: {outcome} — audit could not verify model "
+                    f"(reason: {meta.get('unverified_reason', meta.get('exception', 'unknown'))})"
+                )
+        except (json.JSONDecodeError, KeyError, OSError):
+            result["checks"]["session_audit"] = "BLOCKING"
+            result["status"] = "BLOCKING"
+            result.setdefault("reasons", []).append(
+                f"session audit: metadata file corrupted or unreadable for phase '{art.phase}'"
+            )
+
+
+def cascade_invalidation(artifacts: List[Artifact],
+                         artifact_results: Dict[str, Any]) -> None:
+    """Unified invalidation cascade: any INVALID upstream → ALL dependents INVALID.
+
+    Unlike the old propagate_fallback_to_descendants, this cascades ALL INVALID
+    reasons (session_audit, stale, schema, input_linkage, etc.) transitively.
+    A trust chain is only as strong as its weakest link — one broken upstream
+    means every downstream artifact must be INVALID.
+    """
+    # Build reverse dependency map: input_sha → [dependent_sha, ...]
+    dependents: Dict[str, List[str]] = {}
+    for art in artifacts:
+        for inp in art.inputs:
+            if inp.resolved:
+                dep_sha = inp.resolved.sha256
+                if dep_sha not in dependents:
+                    dependents[dep_sha] = []
+                dependents[dep_sha].append(art.sha256)
+
+    # Iterate until no new INVALID artifacts
+    changed = True
+    while changed:
+        changed = False
+        for dep_sha, result in list(artifact_results.items()):
+            if result.get("status") != "INVALID":
+                continue
+            child_shas = dependents.get(dep_sha, [])
+            for child_sha in child_shas:
+                child_result = artifact_results.get(child_sha)
+                if child_result and child_result.get("status") != "INVALID":
+                    child_result["status"] = "INVALID"
+                    child_result.setdefault("reasons", []).append(
+                        "cascade: upstream artifact is INVALID — trust chain broken"
+                    )
+                    changed = True
+
+
 def resolve_current_attempt(phase_names: List[str], phase_cfgs: Dict[str, Any],
                              latest_by_phase: Dict[str, Artifact],
                              by_phase: Dict[str, List[Artifact]],
@@ -964,8 +1076,14 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None,
             continue
         artifact_results[art.sha256] = compute_artifact_checks(art, phase_cfg, by_phase, latest_by_phase, models)
 
+    # Apply session fallback detection (reads .session-metadata-*.json)
+    apply_session_fallback(artifacts, run_dir, artifact_results, pipeline)
+
     # Apply stale detection to all artifacts (writes back into artifact_results)
     apply_stale_to_all(artifacts, by_phase, artifact_results)
+
+    # Unified cascade: ANY INVALID upstream → ALL dependents INVALID
+    cascade_invalidation(artifacts, artifact_results)
 
     # Select current attempt via transition-aware resolution
     current_art = resolve_current_attempt(phase_names, phase_cfgs, latest_by_phase, by_phase, artifact_results)

@@ -14,6 +14,10 @@ timeout_policy:
   # Phase-level retry (Review BLOCKING → Establish) is governed by
   # per-phase retry.max_rounds, NOT by this policy.
 
+# OT subprocess dispatch timeout in seconds (default 300).
+# Models like Opus analyzing large codebases may need 600+.
+dispatch_timeout_seconds: 300
+
 model_freshness:
   max_staleness_days: 30
   # Default "warning": logs staleness in receipt but does NOT block the pipeline.
