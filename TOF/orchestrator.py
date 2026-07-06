@@ -109,13 +109,7 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
 
         try:
             phase_idx = phase_order.index(next_phase) if next_phase in phase_order else 0
-            # Determine current round: count existing artifacts for this phase
-            existing_rounds = len(list(rd.glob(f"{phase_idx:02d}-{next_phase.capitalize()}*.md")))
-            current_round = existing_rounds + 1
-            if current_round == 1:
-                artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}.md"
-            else:
-                artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}-r{current_round}.md"
+            artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}.md"
             artifact_path = rd / artifact_name
             extra_context = task if (next_phase == "clarify" and task) else None
             session_id = _dispatch_ot(tof_bin.parent, next_phase, assigned_model,
