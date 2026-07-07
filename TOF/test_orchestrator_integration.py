@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integration tests for orchestrator.py dispatch/validate/receipt loop.
 
-These tests exercise the P1.2 dispatch.command_template injection point with
+These tests exercise the P1.2 dispatch.command_argv injection point with
 stub subprocesses. They do NOT require a real hermes CLI or a real agent.log.
 
 Usage: python3 test_orchestrator_integration.py
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import shutil
 import sys
 import tempfile
@@ -159,7 +158,6 @@ def write_minimal_tof_tree(tof_dir: Path, stub_path: Path) -> None:
     """Create a self-contained TOF tree using the real validator and stub dispatch."""
     shutil.copy2(TOF_DIR / "tof", tof_dir / "tof")
 
-    command_template = f"{shlex.quote(sys.executable)} {shlex.quote(str(stub_path))} {{prompt}}"
     (tof_dir / "pipeline.yaml").write_text(textwrap.dedent(f'''
         version: "0.1"
         dispatch_timeout_seconds: 10
@@ -171,7 +169,7 @@ def write_minimal_tof_tree(tof_dir: Path, stub_path: Path) -> None:
           max_staleness_days: 9999
           on_stale: warning
         dispatch:
-          command_template: {command_template!r}
+          command_argv: {[sys.executable, str(stub_path), '{{prompt}}']!r}
           audit_log_path: "/dev/null"
         phases:
           clarify:
@@ -273,7 +271,7 @@ def stub_audit(session_id, log_path, assigned_model, models_registry):
 
 
 def test_dispatch_command_template_roundtrip():
-    """dispatch.command_template substitutes prompt/provider/model into argv safely."""
+    """Legacy dispatch.command_template still substitutes prompt/provider/model."""
     pipeline = {
         "dispatch": {
             "command_template": "python3 stub.py --provider {provider} --model {model} {prompt}"

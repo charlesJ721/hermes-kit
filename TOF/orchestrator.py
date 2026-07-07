@@ -17,7 +17,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-_LEDGER_PATH = os.path.expanduser("~/.hermes/tof-execution-ledger.jsonl")
+_LEDGER_PATH = os.environ.get(
+    "TOF_LEDGER_PATH", os.path.expanduser("~/.hermes/tof-execution-ledger.jsonl")
+)
 
 
 def _write_execution_ledger(mode: str, run_dir: str, status: str) -> None:
@@ -326,17 +328,33 @@ def _build_dispatch_command(pipeline: Dict[str, Any], prompt: str,
                            provider: str, provider_model_id: str) -> List[str]:
     """Build the OT subprocess command from pipeline dispatch template.
 
-    If pipeline.yaml contains dispatch.command_template, use it with
-    {prompt}, {provider}, {model} variable substitution.
-    Otherwise falls back to the default hermes chat -q command.
+    If pipeline.yaml contains dispatch.command_argv, treat it as an argv
+    template: substitute {prompt}, {provider}, {model} within each element
+    and return the resulting argv list directly. This keeps prompt text as a
+    standalone subprocess argument, with no shell quoting or shlex round-trip.
+
+    If only dispatch.command_template exists, use the legacy shell-string path
+    for backward compatibility. Otherwise fall back to the default hermes chat
+    -q command.
 
     Returns a list of argv tokens ready for subprocess.run().
     """
     dispatch_cfg = pipeline.get("dispatch", {}) or {}
+    argv_template = dispatch_cfg.get("command_argv")
+    if argv_template:
+        if not isinstance(argv_template, list):
+            raise RuntimeError("dispatch.command_argv must be a list")
+        return [
+            str(arg).replace("{prompt}", prompt)
+                    .replace("{provider}", provider)
+                    .replace("{model}", provider_model_id)
+            for arg in argv_template
+        ]
+
     template = dispatch_cfg.get("command_template")
     if template:
         # Simple variable substitution: {prompt}, {provider}, {model}
-        # prompt is shell-quoted for safety
+        # Legacy shell-string path: prompt is shell-quoted for safety.
         import shlex
         cmd_str = template.replace("{prompt}", shlex.quote(prompt))
         cmd_str = cmd_str.replace("{provider}", provider)

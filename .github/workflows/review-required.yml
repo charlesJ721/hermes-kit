@@ -31,9 +31,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          INSTRUCTIONS="This change touches TOF core files. It must be accompanied by a family-different REVIEW.md.
+          INSTRUCTIONS="This change touches TOF core files. It must be accompanied by a family-different REVIEW.md in the current diff.
           Generate one with: tof run --only review <run_dir>
-          See TOF/CONTRIBUTING.md for details."
+          See CONTRIBUTING.md for details."
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
@@ -47,15 +47,6 @@ jobs:
           fi
 
           REVIEW_FILES="$(git diff --name-only "$BASE" "$HEAD" | grep -Ei '(^|/)REVIEW\.md$' || true)"
-
-          if [ -z "$REVIEW_FILES" ]; then
-            for loc in TOF/REVIEW.md REVIEW.md; do
-              if [ -f "$loc" ]; then
-                REVIEW_FILES="$loc"
-                break
-              fi
-            done
-          fi
 
           if [ -z "$REVIEW_FILES" ]; then
             echo "::error::No REVIEW.md found."

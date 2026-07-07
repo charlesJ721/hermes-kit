@@ -1484,7 +1484,9 @@ def lint_pipeline(override_pipeline: Optional[Path] = None) -> int:
 # Execution ledger statistics
 # ---------------------------------------------------------------------------
 
-LEDGER_PATH = Path(os.path.expanduser("~/.hermes/tof-execution-ledger.jsonl"))
+LEDGER_PATH = Path(
+    os.environ.get("TOF_LEDGER_PATH", os.path.expanduser("~/.hermes/tof-execution-ledger.jsonl"))
+)
 
 
 def triage_stats(ledger_path: Path = LEDGER_PATH) -> int:

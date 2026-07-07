@@ -39,12 +39,14 @@ verification_confidence:
   on_low_confidence: info   # "info" (no block) | "warning" | "blocking"
 
 # ---- Dispatch configuration ----
-# Template for the OT subprocess command. Variables:
-#   {prompt}     — full prompt text (auto-quoted)
+# Preferred argv template for the OT subprocess command. Variables:
+#   {prompt}     — full prompt text as one argv element (not shell-quoted)
 #   {provider}   — provider name from models.yaml
 #   {model}      — provider_model_id from models.yaml
-# Override to inject a stub for integration testing.
+# Override to inject a stub for integration testing. command_template is kept
+# only for backward compatibility with older pipeline snapshots.
 dispatch:
+  command_argv: ["hermes", "chat", "-q", "{prompt}", "--provider", "{provider}", "--model", "{model}"]
   command_template: 'hermes chat -q "{prompt}" --provider {provider} --model {model}'
   # Path to agent log for session audit. ~ is expanded.
   audit_log_path: "~/.hermes/logs/agent.log"

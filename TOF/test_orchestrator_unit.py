@@ -18,6 +18,7 @@ from pathlib import Path
 # Add TOF dir to path so we can import orchestrator
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orchestrator import (
+    _build_dispatch_command,
     _build_upstream_context,
     _extract_response_body,
     _inject_artifact_shas,
@@ -164,6 +165,61 @@ Resume this session with: hermes chat --continue sess-abc123
     assert "Resume this session" not in result
     assert "Duration:" not in result
     assert "╭" not in result
+
+
+# ── _build_dispatch_command ────────────────────────────────────────
+
+def test_build_dispatch_command_argv_apostrophe_prompt():
+    """command_argv keeps apostrophes in prompt as one argv element."""
+    pipeline = {
+        "dispatch": {
+            "command_argv": ["hermes", "chat", "-q", "{prompt}", "--provider", "{provider}", "--model", "{model}"]
+        }
+    }
+    prompt = "Bob's task"
+    argv = _build_dispatch_command(pipeline, prompt, "openrouter", "openai/gpt-5.5")
+    assert argv == ["hermes", "chat", "-q", prompt, "--provider", "openrouter", "--model", "openai/gpt-5.5"]
+
+
+def test_build_dispatch_command_argv_double_quote_prompt():
+    """command_argv keeps double quotes in prompt as one argv element."""
+    pipeline = {
+        "dispatch": {
+            "command_argv": ["hermes", "chat", "-q", "{prompt}", "--provider", "{provider}", "--model", "{model}"]
+        }
+    }
+    prompt = 'He said "hello"'
+    argv = _build_dispatch_command(pipeline, prompt, "openrouter", "openai/gpt-5.5")
+    assert argv[3] == prompt
+    assert argv[-1] == "openai/gpt-5.5"
+
+
+def test_build_dispatch_command_argv_newline_prompt():
+    """command_argv keeps newlines in prompt as one argv element."""
+    pipeline = {
+        "dispatch": {
+            "command_argv": ["hermes", "chat", "-q", "{prompt}", "--provider", "{provider}", "--model", "{model}"]
+        }
+    }
+    prompt = "line1\nline2"
+    argv = _build_dispatch_command(pipeline, prompt, "openrouter", "openai/gpt-5.5")
+    assert argv[3] == prompt
+    assert len(argv) == 8
+
+
+def test_build_dispatch_command_legacy_command_template_compat():
+    """Legacy command_template remains supported when command_argv is absent."""
+    pipeline = {
+        "dispatch": {
+            "command_template": "python3 stub.py --provider {provider} --model {model} {prompt}"
+        }
+    }
+    prompt = "hello legacy world"
+    argv = _build_dispatch_command(pipeline, prompt, "openrouter", "openai/gpt-5.5")
+    assert argv == [
+        "python3", "stub.py", "--provider", "openrouter",
+        "--model", "openai/gpt-5.5", prompt,
+    ]
 
 
 # ── _build_upstream_context ───────────────────────────────────────
@@ -479,6 +535,11 @@ if __name__ == "__main__":
         ("extract_strips_hermes_header", test_extract_strips_hermes_header),
         ("extract_empty", test_extract_empty),
         ("extract_realistic_hermes_output", test_extract_realistic_hermes_output),
+        # _build_dispatch_command
+        ("build_dispatch_command_argv_apostrophe_prompt", test_build_dispatch_command_argv_apostrophe_prompt),
+        ("build_dispatch_command_argv_double_quote_prompt", test_build_dispatch_command_argv_double_quote_prompt),
+        ("build_dispatch_command_argv_newline_prompt", test_build_dispatch_command_argv_newline_prompt),
+        ("build_dispatch_command_legacy_command_template_compat", test_build_dispatch_command_legacy_command_template_compat),
         # _build_upstream_context
         ("build_context_reads_upstream", test_build_context_reads_upstream),
         ("build_context_multiple_upstream", test_build_context_multiple_upstream),
