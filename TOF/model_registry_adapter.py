@@ -17,6 +17,7 @@ Orchestrator calls check_model(model_id) before dispatch.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -164,10 +165,15 @@ def _fetch_model_list(provider: str) -> set[str]:
     endpoint = PROVIDER_ENDPOINTS[provider]
     cmd = ["curl", "-s", "--max-time", "15", endpoint]
     
-    # OpenRouter needs proxy, DeepSeek direct
+    # OpenRouter needs proxy, DeepSeek direct.
+    # Respect TOF_OPENROUTER_PROXY env var; fallback to legacy hardcoded
+    # proxy for backward compatibility in author's environment.
     env = None
     if provider == "openrouter":
-        env = {**__import__("os").environ, "https_proxy": "http://127.0.0.1:7897"}
+        proxy_url = os.environ.get(
+            "TOF_OPENROUTER_PROXY",
+            os.environ.get("https_proxy", "http://127.0.0.1:7897"))
+        env = {**os.environ, "https_proxy": proxy_url}
     
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=env)
     if proc.returncode != 0:

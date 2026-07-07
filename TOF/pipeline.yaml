@@ -38,6 +38,17 @@ verification_confidence:
   threshold: 0.9
   on_low_confidence: info   # "info" (no block) | "warning" | "blocking"
 
+# ---- Dispatch configuration ----
+# Template for the OT subprocess command. Variables:
+#   {prompt}     — full prompt text (auto-quoted)
+#   {provider}   — provider name from models.yaml
+#   {model}      — provider_model_id from models.yaml
+# Override to inject a stub for integration testing.
+dispatch:
+  command_template: 'hermes chat -q "{prompt}" --provider {provider} --model {model}'
+  # Path to agent log for session audit. ~ is expanded.
+  audit_log_path: "~/.hermes/logs/agent.log"
+
 # ---- Phase definitions ----
 
 phases:
@@ -174,6 +185,11 @@ phases:
       - verify.verdict
       - verify.mismatches
       - verify.vf_results
+    field_rules:
+      verify.mismatches:
+        allow_empty: true
+      verify.vf_results:
+        allow_empty: true
     verdict_field: verify.verdict
     verdicts:
       PASS:

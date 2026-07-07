@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""TOF P0.2a — Causal validation layer.
+"""TOF validator — P1.3 complete.
 
 Read-only validator and pipeline consistency linter.
 Dependencies: Python stdlib + PyYAML.
 
-P0.2a additions:
-  - InputRef resolution: path → verify TOF artifact, phase match, sha256 match
-  - All-artifact checks (not just current)
-  - Stale downstream detection
-  - Causal frontier tracking
+History: P0.1-P0.3 runtime hardening → P1.1-P1.3 execution layer → P2.x fidelity.
+See IMPLEMENTATION_STATUS.md for full capability matrix.
 """
 
 from __future__ import annotations
@@ -397,15 +394,32 @@ def produced_by(fm: Dict[str, Any]) -> Dict[str, Any]:
     return pb if isinstance(pb, dict) else {}
 
 
-def resolve_family_for_artifact(art: Artifact, models: Dict[str, Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
-    """Return (family, error). Registry is authority; artifact actual_family must be consistent."""
+def resolve_family_for_artifact(art: Artifact, models: Dict[str, Dict[str, Any]],
+                                session_metadata: Optional[Dict[str, Dict[str, Any]]] = None) -> Tuple[Optional[str], Optional[str]]:
+    """Return (family, error). Registry is authority; session metadata preferred over artifact self-report."""
     pb = produced_by(art.frontmatter)
     model_id = pb.get("assigned_model") or pb.get("claimed_model")
     if model_id and model_id not in models:
         return None, f"unknown model family for model_id={model_id}"
 
-    actual_family = pb.get("actual_family")
     registry_family = models.get(model_id, {}).get("family") if model_id else None
+
+    # P2.x: prefer session metadata actual_family (adapter-confirmed)
+    # over artifact self-reported actual_family.
+    if session_metadata and art.phase in session_metadata:
+        meta = session_metadata[art.phase]
+        method = meta.get("method") or meta.get("verification_method", "unverified")
+        if method in ("adapter_confirmed", "log_parsed"):
+            meta_family = meta.get("actual_family")
+            if meta_family:
+                if registry_family and str(meta_family) != str(registry_family):
+                    return None, (
+                        f"session audit family={meta_family} != "
+                        f"registry family={registry_family} for {model_id}"
+                    )
+                return str(meta_family), None
+
+    actual_family = pb.get("actual_family")
 
     if actual_family and registry_family:
         if str(actual_family) != str(registry_family):
@@ -429,7 +443,8 @@ def resolve_family_for_artifact(art: Artifact, models: Dict[str, Dict[str, Any]]
 def compute_artifact_checks(art: Artifact, phase_cfg: Dict[str, Any],
                             by_phase: Dict[str, List[Artifact]],
                             latest_by_phase: Dict[str, Artifact],
-                            models: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+                            models: Dict[str, Dict[str, Any]],
+                            session_metadata: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Compute all checks for a single artifact. Returns {checks, reasons, status, verdict}."""
     reasons: List[str] = []
     checks: Dict[str, str] = {}
@@ -442,7 +457,7 @@ def compute_artifact_checks(art: Artifact, phase_cfg: Dict[str, Any],
 
     checks["schema"] = validate_schema(art, phase_cfg, reasons)
     checks["input_linkage"] = validate_input_linkage(art, phase_cfg, by_phase, reasons)
-    checks["model_policy"] = validate_model_policy(art, phase_cfg, latest_by_phase, models, reasons)
+    checks["model_policy"] = validate_model_policy(art, phase_cfg, latest_by_phase, models, reasons, session_metadata)
 
     # Verdict
     try:
@@ -480,8 +495,22 @@ def compute_artifact_checks(art: Artifact, phase_cfg: Dict[str, Any],
 
 def validate_schema(art: Artifact, phase_cfg: Dict[str, Any], reasons: List[str]) -> str:
     ok = True
+    field_rules = phase_cfg.get("field_rules", {}) or {}
+    if not isinstance(field_rules, dict):
+        field_rules = {}
+
     for dotted in phase_cfg.get("required_fields", []) or []:
-        if not isinstance(dotted, str) or not has_nonempty_path(art.frontmatter, dotted):
+        if not isinstance(dotted, str):
+            continue
+        rules = field_rules.get(dotted, {}) or {}
+        allow_empty = rules.get("allow_empty", False)
+        if allow_empty:
+            try:
+                get_path(art.frontmatter, dotted)
+            except KeyError:
+                ok = False
+                reasons.append(f"missing required field: {dotted}")
+        elif not has_nonempty_path(art.frontmatter, dotted):
             ok = False
             reasons.append(f"missing or empty required field: {dotted}")
 
@@ -505,8 +534,7 @@ def validate_schema(art: Artifact, phase_cfg: Dict[str, Any], reasons: List[str]
     if _check_echo(art, reasons):
         ok = False
 
-    field_rules = phase_cfg.get("field_rules", {}) or {}
-    if isinstance(field_rules, dict):
+    if field_rules:
         for dotted, rules in field_rules.items():
             if not isinstance(rules, dict):
                 continue
@@ -664,7 +692,8 @@ def validate_input_linkage(art: Artifact, phase_cfg: Dict[str, Any],
 def validate_model_policy(art: Artifact, phase_cfg: Dict[str, Any],
                           latest_by_phase: Dict[str, Artifact],
                           models: Dict[str, Dict[str, Any]],
-                          reasons: List[str]) -> str:
+                          reasons: List[str],
+                          session_metadata: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
     policy = phase_cfg.get("model_policy") or {}
     if not isinstance(policy, dict) or not policy:
         return "PASS"
@@ -675,8 +704,8 @@ def validate_model_policy(art: Artifact, phase_cfg: Dict[str, Any],
         if other is None:
             reasons.append(f"model policy cannot find phase={other_phase}")
             return "BLOCKING"
-        cur_family, cur_error = resolve_family_for_artifact(art, models)
-        other_family, other_error = resolve_family_for_artifact(other, models)
+        cur_family, cur_error = resolve_family_for_artifact(art, models, session_metadata)
+        other_family, other_error = resolve_family_for_artifact(other, models, session_metadata)
         if cur_error:
             ok = False
             reasons.append(cur_error)
@@ -835,35 +864,48 @@ def apply_stale_to_all(artifacts: List[Artifact], by_phase: Dict[str, List[Artif
 
 def apply_session_fallback(artifacts: List[Artifact], run_dir: Path,
                            artifact_results: Dict[str, Any],
-                           pipeline: Dict[str, Any]) -> None:
+                           pipeline: Dict[str, Any],
+                           models: Optional[Dict[str, Dict[str, Any]]] = None,
+                           allow_untrusted_audit: bool = False) -> None:
     """Read .session-metadata-*.json files and apply outcome-driven validation.
 
-    Outcome mapping:
+    P0 provenance gate: metadata from untrusted sources (fixture, unverified,
+    self_reported without registry backing) is rejected unless
+    allow_untrusted_audit=True.
+
+    Outcome mapping (after gate passes):
     - verified_match → no action (trust chain intact)
     - verified_mismatch / unknown_model → INVALID (trust broken)
     - unverified / unavailable / exception → BLOCKING (cannot verify)
     - no metadata file → BLOCKING (audit gap)
 
+    For adapter_confirmed / log_parsed methods, cross-validates actual_model
+    vs assigned_model and actual_family vs artifact self-reported family.
+
     This is fail-closed: any non-verified_match outcome blocks or invalidates.
-    
+
     Exemption: phases with approval_policy='always' (e.g. clarify) skip audit
     because they are human-produced, not OT-dispatched.
     """
     phases_cfg = pipeline.get("phases", {})
-    
+
     for art in artifacts:
         if art.sha256 not in artifact_results:
             continue
         result = artifact_results[art.sha256]
         if result.get("status") == "INVALID":
+            # Intentional short-circuit: INVALID artifacts have already failed
+            # schema, input_linkage, or model_policy checks. Session audit
+            # cannot reverse an INVALID verdict — it can only add additional
+            # reasons. Skipping saves work without weakening the trust chain.
             continue
-        
+
         # Exempt human-produced phases from session audit
         phase_cfg = phases_cfg.get(art.phase, {})
         if phase_cfg.get("approval_policy") == "always":
             result["checks"]["session_audit"] = "NA"
             continue
-        
+
         meta_path = run_dir / f".session-metadata-{art.phase}.json"
         if not meta_path.exists():
             result["checks"]["session_audit"] = "BLOCKING"
@@ -875,6 +917,98 @@ def apply_session_fallback(artifacts: List[Artifact], run_dir: Path,
             continue
         try:
             meta = json.loads(meta_path.read_text())
+
+            # ================================================================
+            # P0.1 — PROVENANCE GATE
+            # Distinguish trusted evidence (adapter_confirmed/log_parsed from
+            # real OT dispatch) from untrusted evidence (fixture/hand-written/
+            # self_reported without registry backing).
+            # ================================================================
+            method = meta.get("method") or meta.get("verification_method", "unverified")
+
+            if not allow_untrusted_audit:
+                if method in ("fixture", "unverified"):
+                    result["checks"]["session_audit"] = "BLOCKING"
+                    result["status"] = "BLOCKING"
+                    result.setdefault("reasons", []).append(
+                        f"session audit: untrusted evidence source "
+                        f"(method={method}) — metadata was not produced by "
+                        f"an OT dispatch trace. Use --allow-untrusted-audit "
+                        f"to bypass this gate for fixture/testing scenarios."
+                    )
+                    continue
+
+                if method == "self_reported":
+                    assigned = meta.get("assigned_model", "")
+                    dv = "unverified"
+                    if models and assigned in models:
+                        dv = str(models[assigned].get(
+                            "default_verification", "unverified"))
+                    if dv != "self_reported":
+                        result["checks"]["session_audit"] = "BLOCKING"
+                        result["status"] = "BLOCKING"
+                        result.setdefault("reasons", []).append(
+                            f"session audit: self-reported identity not "
+                            f"trusted — model={assigned} "
+                            f"default_verification={dv}"
+                        )
+                        continue
+
+            # ================================================================
+            # P0.1b + P0.2 — CROSS-VALIDATION for trusted methods
+            # When evidence comes from a trusted source, cross-check that
+            # actual_model matches assigned_model, and that actual_family
+            # is consistent with the artifact's self-reported family.
+            # ================================================================
+            if method in ("adapter_confirmed", "log_parsed"):
+                actual_model = meta.get("actual_model", "")
+                assigned_model = meta.get("assigned_model", "")
+                if (actual_model and assigned_model
+                        and actual_model != assigned_model
+                        and meta.get("outcome") == "verified_match"):
+                    result["checks"]["session_audit"] = "BLOCKING"
+                    result["status"] = "INVALID"
+                    result.setdefault("reasons", []).append(
+                        f"session audit: metadata contradiction — "
+                        f"outcome=verified_match but "
+                        f"assigned_model={assigned_model} != "
+                        f"actual_model={actual_model}"
+                    )
+                    continue
+
+                # P0.2: family override — prefer session audit actual_family
+                # over artifact self-reported actual_family
+                meta_family = meta.get("actual_family")
+                if meta_family:
+                    pb = produced_by(art.frontmatter)
+                    art_family = pb.get("actual_family")
+                    if (art_family
+                            and str(art_family) != str(meta_family)):
+                        result["checks"]["model_policy"] = "BLOCKING"
+                        if result.get("status") == "PASS":
+                            result["status"] = "BLOCKING"
+                        result.setdefault("reasons", []).append(
+                            f"model policy: artifact self-reports "
+                            f"actual_family={art_family} but session audit "
+                            f"found actual_family={meta_family} "
+                            f"(actual_model={actual_model})"
+                        )
+
+            # P1.3: provenance check — for trusted methods, require
+            # that the artifact body hash was found in OT stdout.
+            # This is the only mechanical defense against FM-1
+            # (orchestrator writing artifacts without real dispatch).
+            provenance = meta.get("provenance_verified")
+            if provenance is False:
+                result["checks"]["session_audit"] = "BLOCKING"
+                result["status"] = "INVALID"
+                result.setdefault("reasons", []).append(
+                    "session audit: provenance unverified — "
+                    "artifact body hash not found in OT stdout; "
+                    "possible orchestrator-written artifact (FM-1)"
+                )
+                continue
+
             outcome = meta.get("outcome", "unverified")
 
             if outcome == "verified_match":
@@ -885,7 +1019,8 @@ def apply_session_fallback(artifacts: List[Artifact], run_dir: Path,
                 # is not a code defect — when allowed by policy, downgrade
                 # from INVALID to PASS with a WARNING annotation.
                 if (meta.get("fallback_detected") is True
-                        and pipeline.get("timeout_policy", {}).get("allow_provider_fallback") is True):
+                        and pipeline.get("timeout_policy", {}).get(
+                            "allow_provider_fallback") is True):
                     result["checks"]["session_audit"] = "WARNING"
                     result.setdefault("reasons", []).append(
                         f"session audit: provider fallback detected — "
@@ -906,14 +1041,16 @@ def apply_session_fallback(artifacts: List[Artifact], run_dir: Path,
                 result["checks"]["session_audit"] = "BLOCKING"
                 result["status"] = "BLOCKING"
                 result.setdefault("reasons", []).append(
-                    f"session audit: {outcome} — audit could not verify model "
-                    f"(reason: {meta.get('unverified_reason', meta.get('exception', 'unknown'))})"
+                    f"session audit: {outcome} — audit could not verify "
+                    f"model (reason: "
+                    f"{meta.get('unverified_reason', meta.get('exception', 'unknown'))})"
                 )
         except (json.JSONDecodeError, KeyError, OSError):
             result["checks"]["session_audit"] = "BLOCKING"
             result["status"] = "BLOCKING"
             result.setdefault("reasons", []).append(
-                f"session audit: metadata file corrupted or unreadable for phase '{art.phase}'"
+                f"session audit: metadata file corrupted or unreadable "
+                f"for phase '{art.phase}'"
             )
 
 
@@ -1033,7 +1170,8 @@ def resolve_current_attempt(phase_names: List[str], phase_cfgs: Dict[str, Any],
 
 def validate_run(run_dir: Path, fail_on: Optional[str] = None,
                 override_pipeline: Optional[Path] = None,
-                override_models: Optional[Path] = None) -> int:
+                override_models: Optional[Path] = None,
+                allow_untrusted_audit: bool = False) -> int:
     pipeline_path = override_pipeline or locate_config(run_dir, "pipeline.yaml")
     models_path = override_models or locate_config(run_dir, "models.yaml")
     pipeline = load_yaml_file(pipeline_path)
@@ -1097,16 +1235,32 @@ def validate_run(run_dir: Path, fail_on: Optional[str] = None,
     for w in resolve_ws:
         warn(w)
 
+    # Pre-load session metadata for family resolution.
+    # This allows resolve_family_for_artifact to prefer adapter-confirmed
+    # actual_family over artifact self-reported values — closing the
+    # self-attestation loop identified in Round 2 review #3.
+    session_metadata: Dict[str, Dict[str, Any]] = {}
+    for art in artifacts:
+        meta_path = run_dir / f".session-metadata-{art.phase}.json"
+        if meta_path.exists():
+            try:
+                session_metadata[art.phase] = json.loads(meta_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
     # Compute checks for all artifacts
     artifact_results: Dict[str, Any] = {}
     for art in artifacts:
         phase_cfg = phase_cfgs.get(art.phase)
         if phase_cfg is None:
             continue
-        artifact_results[art.sha256] = compute_artifact_checks(art, phase_cfg, by_phase, latest_by_phase, models)
+        artifact_results[art.sha256] = compute_artifact_checks(
+            art, phase_cfg, by_phase, latest_by_phase, models,
+            session_metadata=session_metadata)
 
     # Apply session fallback detection (reads .session-metadata-*.json)
-    apply_session_fallback(artifacts, run_dir, artifact_results, pipeline)
+    apply_session_fallback(artifacts, run_dir, artifact_results, pipeline,
+                           models=models, allow_untrusted_audit=allow_untrusted_audit)
 
     # Apply stale detection to all artifacts (writes back into artifact_results)
     apply_stale_to_all(artifacts, by_phase, artifact_results)
@@ -1339,6 +1493,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_validate.add_argument("--fail-on", choices=["invalid", "blocking", "nonpass"], default=None)
     p_validate.add_argument("--pipeline", type=Path, default=None, help="explicit pipeline.yaml path")
     p_validate.add_argument("--models", type=Path, default=None, help="explicit models.yaml path")
+    p_validate.add_argument("--allow-untrusted-audit", action="store_true", default=False,
+                            help="bypass provenance gate; accept fixture/hand-written metadata")
 
     p_lint = sub.add_parser("lint-pipeline", help="check pipeline.yaml internal consistency")
     p_lint.add_argument("--pipeline", type=Path, default=None, help="explicit pipeline.yaml path")
@@ -1353,7 +1509,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "validate":
         return validate_run(Path(args.run_dir).resolve(), fail_on=args.fail_on,
                            override_pipeline=args.pipeline,
-                           override_models=args.models)
+                           override_models=args.models,
+                           allow_untrusted_audit=args.allow_untrusted_audit)
     if args.command == "lint-pipeline":
         return lint_pipeline(override_pipeline=args.pipeline)
     if args.command == "run":

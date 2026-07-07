@@ -13,7 +13,11 @@ CASES = {
     "test-02-same-family-review": ("INVALID", [], {}),
     "test-03-blocking-with-retry": ("BLOCKING", ["establish"], {}),
     "test-04-retry-exhausted": ("BLOCKING", ["escalation"], {}),
-    "test-05-artifact-claims-next": ("INVALID", [], {}),
+    "test-05-sha-mismatch-and-claims-next-warning": ("INVALID", [], {
+        "input_linkage": "BLOCKING",  # SHA mismatch triggers INVALID
+        # schema=BLOCKING: local pipeline has blocking in required_fields (old schema)
+        # next_allowed="implement" in artifact → ignored (warning, non-fatal)
+    }),
     "test-06-hash-mismatch": ("INVALID", [], {}),
     # P0.2a fixtures
     "test-a-path-mismatch-phase": ("INVALID", [], {"input_linkage": "BLOCKING"}),
@@ -25,13 +29,34 @@ CASES = {
     # P0.2b fixtures
     "test-g-family-mismatch": ("INVALID", [], {"model_policy": "BLOCKING"}),
     "test-h-family-match": ("PASS", [], {"model_policy": "PASS"}),
+    # Multi-round retry backtrack — resolve_current_attempt test
+    # Review v1 BLOCKING → Establish v2 → Review v2 PASS
+    "test-retry-backtrack": ("PASS", [], {
+        "schema": "PASS",
+        "input_linkage": "PASS",
+        "model_policy": "PASS",
+    }),
     # Smoke test — full 6-phase pipeline
     "test-smoke-full-pipeline": ("PASS", [], {}),
+    # Production schema fixture — verifies review.blocking=[]
+    # under required_if_verdict (Round 2 Bug #1 fix validation).
+    # Review itself passes all checks; cascade INVALID from establish
+    # required_if_present is expected (known design tension, Round 2 #7).
+    "test-prod-clean-pass": ("INVALID", [], {
+        "schema": "PASS",
+        "input_linkage": "PASS",
+        "model_policy": "PASS",
+    }),
 }
 
 failures = []
 for name, (status, next_allowed, check_checks) in CASES.items():
-    proc = subprocess.run([str(TOF), "validate", str(ROOT / "test-fixtures" / name)], text=True, capture_output=True)
+    cmd = [str(TOF), "validate", "--allow-untrusted-audit"]
+    if name == "test-prod-clean-pass":
+        cmd.extend(["--pipeline", str(ROOT / "pipeline.yaml"),
+                    "--models", str(ROOT / "models.yaml")])
+    cmd.append(str(ROOT / "test-fixtures" / name))
+    proc = subprocess.run(cmd, text=True, capture_output=True)
     if proc.returncode != 0:
         failures.append(f"{name}: default exit {proc.returncode}, expected 0; stderr={proc.stderr!r}")
         continue
@@ -53,13 +78,13 @@ for name, (status, next_allowed, check_checks) in CASES.items():
             failures.append(f"{name}: checks.{ck}={actual} != {cv}")
 
 FAIL_ON = [
-    (["test-01-missing-unknowns", "--fail-on", "invalid"], 1),
-    (["test-03-blocking-with-retry", "--fail-on", "blocking"], 1),
-    (["test-03-blocking-with-retry", "--fail-on", "nonpass"], 1),
+    (["--allow-untrusted-audit", "--fail-on", "invalid"], "test-01-missing-unknowns", 1),
+    (["--allow-untrusted-audit", "--fail-on", "blocking"], "test-03-blocking-with-retry", 1),
+    (["--allow-untrusted-audit", "--fail-on", "nonpass"], "test-03-blocking-with-retry", 1),
 ]
-for args, expected in FAIL_ON:
-    name = args[0]
-    proc = subprocess.run([str(TOF), "validate", str(ROOT / "test-fixtures" / name), *args[1:]], text=True, capture_output=True)
+for args, name, expected in FAIL_ON:
+    cmd = [str(TOF), "validate"] + args + [str(ROOT / "test-fixtures" / name)]
+    proc = subprocess.run(cmd, text=True, capture_output=True)
     if proc.returncode != expected:
         failures.append(f"{' '.join(args)}: exit {proc.returncode} != {expected}; stdout={proc.stdout!r} stderr={proc.stderr!r}")
 

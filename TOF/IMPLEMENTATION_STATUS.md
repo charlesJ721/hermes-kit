@@ -1,65 +1,64 @@
-# Implementation Status
+# Implementation Status — 2026-07-07 (P1.3 complete)
 
 > What works today, what's deferred, and what's out of scope.
 
-## MECHANICAL — Enforced by `tof validate`
+## Version Mapping
 
-All checks below produce INVALID receipts when violated. Backed by 14 fixture tests.
+| Label | Meaning | Date |
+|-------|---------|------|
+| pipeline.yaml:0.1 | Schema version (not framework version) | — |
+| P0.1-P0.3 | Runtime hardening: 5-check chain, session audit, config snapshot | 2026-07-03/04 |
+| P1.1-P1.3 | Execution layer: orchestrator tests, dispatch template, provenance | 2026-07-07 |
+| P2.x | Test fidelity: production schema, retry backtrack, allow_empty | 2026-07-07 |
+| v2.1 (skill) | TOF specification version in task-orchestration-framework SKILL.md | — |
+| v4 hardening | Post-P0.3 config split-brain fix + production validations | 2026-07-05 |
+
+Current effective version: **P1.3** (all P0+P1 gates mechanical, orchestrator tested).
+
+## Test Coverage (48 tests)
+
+| Suite | Count | Covers |
+|-------|-------|--------|
+| tests_expected.py | 17 fixtures | tof validate: 5 checks + cascade + retry + backtrack |
+| test_orchestrator_unit.py | 26 tests | _preprocess_prompt, _extract_response_body, _inject_artifact_shas, _build_upstream_context, _snapshot_configs |
+| test_orchestrator_integration.py | 4 tests | dispatch→validate→receipt loop, INVALID detection, provenance check |
+| tof lint-pipeline | 1 | pipeline.yaml consistency |
+
+## MECHANICAL — Enforced by `tof validate`
 
 | Constraint | Mechanism | Since |
 |-----------|-----------|-------|
-| Schema validation | `validate_schema()` checks frontmatter dotted paths against pipeline.yaml | P0.1 |
-| Input lineage | `validate_input_linkage()` — path+phase+sha256 resolution, required/required_if_present | P0.2a |
-| Stale downstream detection | `check_stale()` + `apply_stale_to_all()` — global artifact truth | P0.2a |
-| Model family diversity | `model_policy.family_must_differ_from` — registry-backed check | P0.1 |
-| Model family consistency | `actual_family` must match `models.yaml[assigned_model].family` | P0.2b |
-| OT verification (who actually ran) | SessionAuditAdapter → reads agent.log → injects actual_model/fallback into receipt | P0.2b |
-| Orchestrator (tof run) | Receipt-driven state machine loop with OT subprocess dispatch | v3 |
-| Retry budget | `validate_retry_budget()` — `>=max_rounds` → escalation | P0.1 |
-| Verdict validation | Invalid verdict → INVALID | P0.1 |
-| Config source tracking | Receipt embeds `pipeline_path` + `pipeline_sha256` + `models_path` + `models_sha256` | P0.3 |
-| Model freshness | `model_freshness.max_staleness_days` + `on_stale` (warning/blocking) | post-review |
-| Timeout policy validation | `timeout_policy` struct check in lint-pipeline | post-review |
-| Model assignment validation | lint-pipeline checks model field exists and is in models.yaml | v3 |
+| Schema validation | `validate_schema()` — required_fields, required_if_verdict, allow_empty, echo detection | P0.1 |
+| Input lineage | Path+phase+SHA256 resolution, required/required_if_present | P0.2a |
+| Stale downstream detection | Global artifact truth, cascade | P0.2a |
+| Model family diversity | `family_must_differ_from` — registry-backed | P0.1 |
+| Model family consistency | `actual_family` must match registry; session audit cross-check | P0.2b, P0.2 |
+| Session audit provenance gate | Rejects fixture/unverified/self_reported evidence; `--allow-untrusted-audit` bypass | P0.1 |
+| actual-vs-assigned cross-check | For trusted methods, validates actual_model == assigned_model | P0.1b |
+| Family override from metadata | Session audit actual_family overrides artifact self-report | P0.2 |
+| Provenance hash | Artifact body must appear in OT stdout (FM-1 defense) | P1.3 |
+| Retry budget | `>=max_rounds` → escalation | P0.1 |
+| Config source tracking | Receipt embeds pipeline/models path+SHA256 | P0.3 |
+| Config split-brain prevention | Orchestrator snapshots configs to .tof/ before run | P0.3 |
+| Model slug pre-dispatch gate | Validates slug against models.yaml + provider freshness | P0.3 |
 
 ## BEHAVIORAL — Documented protocol, not enforced by code
 
-These are documented for correct operation. Violations are detectable by a human auditor but do not produce INVALID receipts.
-
 | Protocol | Documented in | Notes |
 |----------|-------------|-------|
-| STATE_LOCKER | CORE_CONCEPTS.md | Interactive UX protocol; no runtime interceptor exists |
-| Orchestrator behavior boundaries | CORE_CONCEPTS.md | Orchestrator must not do downstream phase work; enforced by discipline |
-| Phase EX escalation | PHASES.md | Human-in-the-loop decision; validator detects condition but routing is manual |
+| STATE_LOCKER | SKILL.md §0.1 | UX protocol for manual supervision workflows |
+| Orchestrator behavior boundaries | SKILL.md §安全沙箱层 | What orchestrator may/may not do |
+| Phase EX escalation | SKILL.md §Phase EX | Human-in-the-loop escalation path |
+| Constitution review | SKILL.md §0.2 | Design constitution enforcement |
+| Knowledge Deposition | SKILL.md §Phase 5.5 | Five-channel check |
 
-## DEFERRED — Adapter implementations not yet built
+## Known Gaps
 
-These are defined in `adapter-contract.md` but have no real implementation yet. P0 uses fake adapters that construct facts from artifact frontmatter.
-
-| Adapter | Status |
-|---------|--------|
-| DispatchAdapter | Live: Orchestrator dispatches via `hermes chat -q` OT subprocess |
-| SessionAuditAdapter | Live: reads agent.log → actual_model/actual_family/fallback_detected (137 lines) |
-| ArtifactStore | Inline: reads `.md` files directly from the filesystem |
-| ModelRegistryAdapter | Not implemented: model slug freshness checked manually |
-| KnowledgeDepositionAdapter | Not implemented |
-| ApprovalAdapter | Not implemented |
-
-## OUT OF SCOPE — Design boundaries
-
-| Topic | Why | 
-|-------|-----|
-| Parallel task execution | TOF handles single linear pipelines; parallel task splitting is a different scheduling problem |
-| Partially-completed Implement rollback | If Implement fails at 80%, work is discarded — no checkpoint/resume |
-| Review content quality assessment | TOF verifies Review artifact exists with different model family, not whether the review is substantive |
-| End-to-end pipeline execution | TOF validates artifacts; it does not execute model dispatches or orchestrate the pipeline | 
-
-## Cold-Read Review
-
-This framework should periodically receive **cold-read review** from someone unfamiliar with its internals. Designers are blind to the gaps that new users discover immediately. The review that produced this document found several issues that internal review would not have caught:
-
-- An external reviewer looking for `model_freshness` fields in the wrong file surfaced the CODEX/DATA separation design intent — a feature, not a bug, but only visible through outsider confusion
-- `on_stale` was described as `blocking` in documentation but implemented as `warning` — only caught by cross-referencing code against claims
-- The double-retry system (`timeout_policy` vs per-phase `retry`) was never explicitly documented until an outsider asked "how do these relate?"
-
-Convention: before each major version bump, invite a cold-read review. The reviewer should not read the documentation first — they should try to use the system and report what breaks.
+| Gap | Severity | Status |
+|-----|----------|--------|
+| verify.mismatches empty list required allow_empty | Low | Fixed (P2.x) |
+| required_if_present circular SHA problem | Low | Documented; forward-flow workaround |
+| cascade fail-closed granularity | Low | BLOCKING does not cascade; fine for now |
+| orchestrator depends on hermes CLI (default template) | Low | Template override available via dispatch.command_template |
+| model_registry_adapter uses personal proxy as fallback | Low | TOF_OPENROUTER_PROXY env var override available |
+| memory_dreaming_adapter removed from repo | Resolved | Sanitized per CONVENTIONS.md; personal tool, not framework |

@@ -14,14 +14,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> int:
+def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
+        audit_fn: Optional[Callable[[str, str, str, Dict[str, Dict[str, Any]]], Tuple[Any, Dict[str, Any]]]] = None) -> int:
     """Orchestrate a TOF run to completion (or single step)."""
     rd = Path(run_dir).resolve()
     if not rd.exists():
@@ -112,7 +113,7 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
             artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}.md"
             artifact_path = rd / artifact_name
             extra_context = task if (next_phase == "clarify" and task) else None
-            session_id = _dispatch_ot(tof_bin.parent, next_phase, assigned_model,
+            session_id, provenance_verified = _dispatch_ot(tof_bin.parent, next_phase, assigned_model,
                                      artifact_path, rd, pipeline, models_registry,
                                      extra_context=extra_context)
         except RuntimeError as e:
@@ -121,11 +122,16 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None) -> in
 
         # Session audit
         try:
-            from session_audit_adapter import read_session as audit
+            if audit_fn is None:
+                from session_audit_adapter import read_session as audit
+            else:
+                audit = audit_fn
 
-            log_path = os.path.expanduser("~/.hermes/logs/agent.log")
+            log_path = os.path.expanduser(
+                pipeline.get("dispatch", {}).get("audit_log_path", "~/.hermes/logs/agent.log")
+            )
             outcome, result = audit(session_id, log_path, assigned_model, models_registry)
-            _write_metadata(rd, next_phase, session_id, result)
+            _write_metadata(rd, next_phase, session_id, result, provenance_verified)
             print(f"  metadata: actual={result['actual_model']} "
                   f"outcome={outcome.value} "
                   f"confidence={result['verification_confidence']}")
@@ -181,10 +187,40 @@ def _find_tof_bin() -> Path:
 _SESSION_RE = re.compile(r"Session:\s+(\S+)")
 
 
+def _build_dispatch_command(pipeline: Dict[str, Any], prompt: str,
+                           provider: str, provider_model_id: str) -> List[str]:
+    """Build the OT subprocess command from pipeline dispatch template.
+
+    If pipeline.yaml contains dispatch.command_template, use it with
+    {prompt}, {provider}, {model} variable substitution.
+    Otherwise falls back to the default hermes chat -q command.
+
+    Returns a list of argv tokens ready for subprocess.run().
+    """
+    dispatch_cfg = pipeline.get("dispatch", {}) or {}
+    template = dispatch_cfg.get("command_template")
+    if template:
+        # Simple variable substitution: {prompt}, {provider}, {model}
+        # prompt is shell-quoted for safety
+        import shlex
+        cmd_str = template.replace("{prompt}", shlex.quote(prompt))
+        cmd_str = cmd_str.replace("{provider}", provider)
+        cmd_str = cmd_str.replace("{model}", provider_model_id)
+        return shlex.split(cmd_str)
+
+    # Default: hermes chat -q
+    return ["hermes", "chat", "-q", prompt,
+            "--provider", provider, "--model", provider_model_id]
+
+
+# ---------------------------------------------------------------------------
+# Internal: dispatch
+# ---------------------------------------------------------------------------
+
 def _dispatch_ot(tof_dir: Path, phase: str, model: str, artifact_path: Path,
                  run_dir: Path, pipeline: Dict[str, Any],
                  models_registry: Dict[str, Dict[str, Any]],
-                 extra_context: Optional[str] = None) -> str:
+                 extra_context: Optional[str] = None) -> Tuple[str, bool]:
     """Run hermes chat -q, wait for artifact to be written to artifact_path.
     
     The prompt instructs the model to write its output directly to the target
@@ -235,11 +271,7 @@ def _dispatch_ot(tof_dir: Path, phase: str, model: str, artifact_path: Path,
     prompt_file = run_dir / f".hermes_prompt_{phase}.txt"
     prompt_file.write_text(prompt)
 
-    cmd = [
-        "hermes", "chat", "-q", prompt,
-        "--provider", provider,
-        "--model", provider_model_id,
-    ]
+    cmd = _build_dispatch_command(pipeline, prompt, provider, provider_model_id)
 
     # Read dispatch timeout and retry policy from pipeline config
     dispatch_timeout = int(pipeline.get("dispatch_timeout_seconds", 300))
@@ -271,7 +303,7 @@ def _dispatch_ot(tof_dir: Path, phase: str, model: str, artifact_path: Path,
     if proc is None:
         raise RuntimeError(f"OT dispatch failed for phase '{phase}': no process result")
 
-    output = proc.stdout or proc.stderr
+    output = (proc.stdout or "") + (proc.stderr or "")
     if not output:
         raise RuntimeError(f"hermes chat produced no output (exit {proc.returncode})")
 
@@ -305,7 +337,16 @@ def _dispatch_ot(tof_dir: Path, phase: str, model: str, artifact_path: Path,
     # Inject mechanical metadata (SHA256, model identity)
     _inject_artifact_shas(artifact_path, run_dir, pipeline, phase, model, model_cfg)
 
-    return session_id
+    # Provenance check: does the artifact body appear in OT output?
+    # Extract body (content after frontmatter), check OT stdout for it.
+    # Saves OT output to disk for future independent verification by validator.
+    (run_dir / f".ot-stdout-{phase}.txt").write_text(output)
+    text = artifact_path.read_text()
+    parts = text.split("---", 2)
+    body = parts[2].strip() if len(parts) >= 3 else ""
+    provenance_verified = bool(body and len(body) > 5 and body in output)
+
+    return session_id, provenance_verified
 
 
 def _strip_ansi(text: str) -> str:
@@ -503,7 +544,8 @@ def _inject_artifact_shas(artifact_path: Path, run_dir: Path,
         print(f"  WARNING: SHA injection failed for {artifact_path.name}: {e}")
 
 def _write_metadata(run_dir: Path, phase: str, session_id: str,
-                    result: Dict[str, Any]) -> None:
+                    result: Dict[str, Any],
+                    provenance_verified: Optional[bool] = None) -> None:
     """Write session-metadata.json alongside artifacts."""
     path = run_dir / f".session-metadata-{phase}.json"
     payload = {
@@ -518,6 +560,8 @@ def _write_metadata(run_dir: Path, phase: str, session_id: str,
         "latency_ms": result["latency_ms"],
         "verification_confidence": result["verification_confidence"],
         "verification_method": result["method"],
+        "outcome": result.get("outcome"),
+        "provenance_verified": provenance_verified,
     }
     path.write_text(json.dumps(payload, indent=2))
 
@@ -612,15 +656,18 @@ def _preprocess_prompt(prompt: str, run_dir: Path, phase: str,
     )
 
     # Remaining FILL WITH — convert to safe template markers
-    # FILL WITH PASS|FAIL → {{FIELD: PASS|FAIL}}
+    # Order matters: descriptive text (must contain at least one lowercase)
+    # before PASS|FAIL (all caps, pipes, underscores only).
+    # FILL WITH <descriptive text> → {{FIELD: descriptive text}}
+    # Requires [a-z] to distinguish from all-caps tokens like PASS|FAIL.
     prompt = re.sub(
-        r'FILL WITH ([A-Z_| ]+)',
+        r'FILL WITH ([A-Z][A-Za-z ]*[a-z][A-Za-z ]*)',
         r'{{FIELD: \1}}',
         prompt
     )
-    # FILL WITH <descriptive text> → {{FIELD: descriptive text}}
+    # FILL WITH PASS|FAIL → {{FIELD: PASS|FAIL}}
     prompt = re.sub(
-        r'FILL WITH ([A-Z][A-Za-z ]+)',
+        r'FILL WITH ([A-Z_| ]+)',
         r'{{FIELD: \1}}',
         prompt
     )
