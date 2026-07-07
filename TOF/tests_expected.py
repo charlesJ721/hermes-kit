@@ -40,9 +40,8 @@ CASES = {
     "test-smoke-full-pipeline": ("PASS", [], {}),
     # Production schema fixture — verifies review.blocking=[]
     # under required_if_verdict (Round 2 Bug #1 fix validation).
-    # Review itself passes all checks; cascade INVALID from establish
-    # required_if_present is expected (known design tension, Round 2 #7).
-    "test-prod-clean-pass": ("INVALID", [], {
+    # Now PASS: required_if_present removed from establish (round 3 fix).
+    "test-prod-clean-pass": ("PASS", ["implement"], {
         "schema": "PASS",
         "input_linkage": "PASS",
         "model_policy": "PASS",

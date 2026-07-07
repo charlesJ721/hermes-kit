@@ -106,8 +106,6 @@ phases:
       required:
         - clarify
         - scout
-      required_if_present:
-        - review
     required_fields:
       - establish.architecture
       - establish.steps

@@ -994,20 +994,20 @@ def apply_session_fallback(artifacts: List[Artifact], run_dir: Path,
                             f"(actual_model={actual_model})"
                         )
 
-            # P1.3: provenance check — for trusted methods, require
-            # that the artifact body hash was found in OT stdout.
-            # This is the only mechanical defense against FM-1
-            # (orchestrator writing artifacts without real dispatch).
-            provenance = meta.get("provenance_verified")
-            if provenance is False:
-                result["checks"]["session_audit"] = "BLOCKING"
-                result["status"] = "INVALID"
-                result.setdefault("reasons", []).append(
-                    "session audit: provenance unverified — "
-                    "artifact body hash not found in OT stdout; "
-                    "possible orchestrator-written artifact (FM-1)"
-                )
-                continue
+                # P1.3: provenance check — for trusted methods, require
+                # that the artifact body hash was found in OT stdout.
+                # This is the only mechanical defense against FM-1
+                # (orchestrator writing artifacts without real dispatch).
+                provenance = meta.get("provenance_verified")
+                if provenance is not True:
+                    result["checks"]["session_audit"] = "BLOCKING"
+                    result["status"] = "INVALID"
+                    result.setdefault("reasons", []).append(
+                        "session audit: provenance unverified — "
+                        "artifact body hash not found in OT stdout; "
+                        "possible orchestrator-written artifact (FM-1)"
+                    )
+                    continue
 
             outcome = meta.get("outcome", "unverified")
 

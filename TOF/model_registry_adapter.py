@@ -165,15 +165,14 @@ def _fetch_model_list(provider: str) -> set[str]:
     endpoint = PROVIDER_ENDPOINTS[provider]
     cmd = ["curl", "-s", "--max-time", "15", endpoint]
     
-    # OpenRouter needs proxy, DeepSeek direct.
-    # Respect TOF_OPENROUTER_PROXY env var; fallback to legacy hardcoded
-    # proxy for backward compatibility in author's environment.
+    # OpenRouter may need proxy; use TOF_OPENROUTER_PROXY or https_proxy.
+    # No default fallback — if neither is set, curl connects directly.
     env = None
     if provider == "openrouter":
-        proxy_url = os.environ.get(
-            "TOF_OPENROUTER_PROXY",
-            os.environ.get("https_proxy", "http://127.0.0.1:7897"))
-        env = {**os.environ, "https_proxy": proxy_url}
+        proxy_url = os.environ.get("TOF_OPENROUTER_PROXY",
+                                   os.environ.get("https_proxy"))
+        if proxy_url:
+            env = {**os.environ, "https_proxy": proxy_url}
     
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=env)
     if proc.returncode != 0:
