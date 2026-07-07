@@ -1,0 +1,72 @@
+name: Review required
+
+on:
+  push:
+    paths:
+      - 'TOF/tof'
+      - 'TOF/orchestrator.py'
+      - 'TOF/pipeline.yaml'
+      - 'TOF/model_registry_adapter.py'
+      - 'TOF/session_audit_adapter.py'
+      - 'TOF/phases/**'
+  pull_request:
+    paths:
+      - 'TOF/tof'
+      - 'TOF/orchestrator.py'
+      - 'TOF/pipeline.yaml'
+      - 'TOF/model_registry_adapter.py'
+      - 'TOF/session_audit_adapter.py'
+      - 'TOF/phases/**'
+
+jobs:
+  check-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for REVIEW.md
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INSTRUCTIONS="This change touches TOF core files. It must be accompanied by a family-different REVIEW.md.
+          Generate one with: tof run --only review <run_dir>
+          See TOF/CONTRIBUTING.md for details."
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+            if [[ "$BASE" =~ ^0+$ ]]; then
+              BASE="$(git rev-list --max-parents=0 "$HEAD")"
+            fi
+          fi
+
+          REVIEW_FILES="$(git diff --name-only "$BASE" "$HEAD" | grep -Ei '(^|/)REVIEW\.md$' || true)"
+
+          if [ -z "$REVIEW_FILES" ]; then
+            for loc in TOF/REVIEW.md REVIEW.md; do
+              if [ -f "$loc" ]; then
+                REVIEW_FILES="$loc"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$REVIEW_FILES" ]; then
+            echo "::error::No REVIEW.md found."
+            printf '%s\n' "$INSTRUCTIONS"
+            exit 1
+          fi
+
+          if ! grep -Eq 'review\.verdict|^[[:space:]]*verdict[[:space:]]*:' $REVIEW_FILES; then
+            echo "::error::REVIEW.md found but missing review.verdict field."
+            printf '%s\n' "$INSTRUCTIONS"
+            exit 1
+          fi
+
+          echo "REVIEW.md found with review.verdict field: $REVIEW_FILES"
