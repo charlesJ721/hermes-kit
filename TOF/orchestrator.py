@@ -315,6 +315,67 @@ def _build_dispatch_command(pipeline: Dict[str, Any], prompt: str,
             "--provider", provider, "--model", provider_model_id]
 
 
+def run_triage(task: str, pipeline: Dict[str, Any], models: Dict[str, Dict[str, Any]],
+               tof_dir: Path) -> Dict[str, str]:
+    """Dispatch a cheap adversarial triage. Returns parsed JSON route decision.
+
+    Triage is advisory-only: it does not use _dispatch_ot, does not write to a
+    run_dir, and does not create provenance/session metadata.
+    """
+    triage_cfg = pipeline.get("phases", {}).get("triage", {})
+    if not triage_cfg:
+        raise RuntimeError("pipeline.yaml missing 'triage' phase")
+
+    model = triage_cfg.get("model")
+    if not model:
+        raise RuntimeError("triage phase missing model")
+    model_cfg = models.get(model, {})
+    provider = model_cfg.get("provider", "openrouter")
+    provider_model_id = model_cfg.get("provider_model_id", model)
+
+    prompt_rel = triage_cfg.get("prompt", "phases/triage/prompt.md")
+    prompt_path = tof_dir / prompt_rel
+    if not prompt_path.exists():
+        raise RuntimeError(f"triage prompt not found: {prompt_path}")
+
+    prompt = prompt_path.read_text().replace("{task}", task)
+
+    # Build just enough pipeline for command_template dispatch.
+    mini_pipeline = {"dispatch": pipeline.get("dispatch", {})}
+    cmd = _build_dispatch_command(mini_pipeline, prompt, provider, provider_model_id)
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                          cwd=str(tof_dir))
+    output = (proc.stdout or "") + (proc.stderr or "")
+    output = _strip_ansi(output)
+    if not output:
+        raise RuntimeError(f"triage dispatch produced no output (exit {proc.returncode})")
+
+    # Extract JSON from output. Prefer a fenced JSON block if present, then any
+    # shallow object; triage output contract is exactly one flat JSON object.
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", output, re.DOTALL)
+    match = fenced or re.search(r"\{[^{}]*\}", output, re.DOTALL)
+    if not match:
+        raise RuntimeError(f"no JSON found in triage output: {output[:200]}")
+
+    json_text = match.group(1) if fenced else match.group(0)
+    try:
+        result = json.loads(json_text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"invalid JSON in triage output: {e}: {json_text[:200]}") from e
+
+    valid_routes = {"self", "review-only", "scout+review", "full-seri"}
+    route = result.get("route", "self")
+    if route not in valid_routes:
+        route = "self"
+
+    return {
+        "route": route,
+        "blind_spot": str(result.get("blind_spot", "")),
+        "reasoning": str(result.get("reasoning", "")),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Internal: dispatch
 # ---------------------------------------------------------------------------

@@ -118,7 +118,7 @@ def phase_items(pipeline: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
     phases = pipeline.get("phases")
     if not isinstance(phases, dict) or not phases:
         die("pipeline.yaml must contain a non-empty 'phases' mapping")
-    return list(phases.items())
+    return [(name, cfg) for name, cfg in phases.items() if name != "triage"]
 
 
 def get_path(obj: Any, dotted: str) -> Any:
@@ -1506,6 +1506,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                        help="dispatch only this phase (e.g., review, scout, establish)")
     p_run.add_argument("--task", type=str, default=None, help="task description for the clarify phase")
 
+    p_triage = sub.add_parser("triage", help="route a task to self-execution or TOF stage")
+    p_triage.add_argument("task", type=str, help="task description (quote if multi-word)")
+
     args = parser.parse_args(argv)
 
     if args.command == "validate":
@@ -1519,6 +1522,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         from orchestrator import run as orch_run
         return orch_run(args.run_dir, step_mode=args.step, task=args.task,
                         only_phase=args.only)
+    if args.command == "triage":
+        pipeline_path = locate_config(Path.cwd(), "pipeline.yaml")
+        models_path = locate_config(Path.cwd(), "models.yaml")
+        pipeline = load_yaml_file(pipeline_path)
+        models_yaml = load_yaml_file(models_path)
+        models = load_model_registry(models_yaml)
+        tof_dir = pipeline_path.parent
+
+        from orchestrator import run_triage
+        try:
+            result = run_triage(args.task, pipeline, models, tof_dir)
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, indent=2))
+        return 0
     parser.error("unknown command")
     return 2
 

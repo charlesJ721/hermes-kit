@@ -52,6 +52,11 @@ dispatch:
 # ---- Phase definitions ----
 
 phases:
+  # Standalone advisory phase — not part of the main SERI DAG
+  triage:
+    model: deepseek-v4-flash
+    prompt: "phases/triage/prompt.md"
+
   clarify:
     artifact: TASK.md
     model: deepseek-v4-flash
