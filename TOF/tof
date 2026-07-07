@@ -1481,6 +1481,68 @@ def lint_pipeline(override_pipeline: Optional[Path] = None) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Execution ledger statistics
+# ---------------------------------------------------------------------------
+
+LEDGER_PATH = Path(os.path.expanduser("~/.hermes/tof-execution-ledger.jsonl"))
+
+
+def triage_stats(ledger_path: Path = LEDGER_PATH) -> int:
+    if not ledger_path.exists():
+        print("No execution records yet.")
+        return 0
+
+    entries: List[Dict[str, Any]] = []
+    try:
+        with ledger_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(entry, dict):
+                    entries.append(entry)
+    except OSError:
+        print("No execution records yet.")
+        return 0
+
+    if not entries:
+        print("No execution records yet.")
+        return 0
+
+    mode_counts: Dict[str, int] = {}
+    error_count = 0
+    for entry in entries:
+        mode = str(entry.get("mode") or "unknown")
+        mode_counts[mode] = mode_counts.get(mode, 0) + 1
+        if str(entry.get("status") or "").upper() == "ERROR":
+            error_count += 1
+
+    full_seri_count = mode_counts.get("full-seri", 0)
+    single_stage_count = sum(count for mode, count in mode_counts.items() if mode != "full-seri")
+
+    print(f"Total executions: {len(entries)}")
+    print("By mode:")
+    print(f"  full-seri: {full_seri_count}")
+    print(f"  single-stage: {single_stage_count}")
+    for mode in sorted(mode_counts):
+        if mode != "full-seri":
+            print(f"  {mode}: {mode_counts[mode]}")
+    print(f"ERROR: {error_count}")
+    print("Last 10 entries:")
+    print(f"{'timestamp':<32} {'mode':<20} {'status':<10}")
+    for entry in entries[-10:]:
+        timestamp = str(entry.get("timestamp", ""))
+        mode = str(entry.get("mode", ""))
+        status = str(entry.get("status", ""))
+        print(f"{timestamp:<32} {mode:<20} {status:<10}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1509,6 +1571,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_triage = sub.add_parser("triage", help="route a task to self-execution or TOF stage")
     p_triage.add_argument("task", type=str, help="task description (quote if multi-word)")
 
+    sub.add_parser("triage-stats", help="show TOF execution ledger statistics")
+
     args = parser.parse_args(argv)
 
     if args.command == "validate":
@@ -1522,6 +1586,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         from orchestrator import run as orch_run
         return orch_run(args.run_dir, step_mode=args.step, task=args.task,
                         only_phase=args.only)
+    if args.command == "triage-stats":
+        return triage_stats()
     if args.command == "triage":
         pipeline_path = locate_config(Path.cwd(), "pipeline.yaml")
         models_path = locate_config(Path.cwd(), "models.yaml")

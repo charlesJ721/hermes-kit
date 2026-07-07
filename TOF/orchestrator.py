@@ -7,6 +7,7 @@ re-runs tof validate.  Stateless and idempotent.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import re
@@ -15,6 +16,34 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+_LEDGER_PATH = os.path.expanduser("~/.hermes/tof-execution-ledger.jsonl")
+
+
+def _write_execution_ledger(mode: str, run_dir: str, status: str) -> None:
+    """Append a best-effort execution record; never fail TOF runs."""
+    try:
+        entry = {
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "mode": mode,
+            "run_dir": run_dir,
+            "status": status,
+        }
+        with open(_LEDGER_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def _ledger_status(status: Any) -> str:
+    """Normalize validator/orchestrator states into ledger status values."""
+    status_str = str(status or "ERROR").upper()
+    return status_str if status_str in {"PASS", "BLOCKING", "INVALID"} else "ERROR"
+
+
+def _return_with_ledger(mode: str, run_dir: Path, status: Any, rc: int) -> int:
+    _write_execution_ledger(mode, str(run_dir), _ledger_status(status))
+    return rc
 
 
 # ---------------------------------------------------------------------------
@@ -44,19 +73,20 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
 
     if only_phase:
         next_phase = only_phase.strip().lower()
+        ledger_mode = f"single-{next_phase}"
         phase_cfg = pipeline.get("phases", {}).get(next_phase)
         if not phase_cfg:
             print(f"STOP — phase '{next_phase}' not found in pipeline.yaml")
-            return 1
+            return _return_with_ledger(ledger_mode, rd, "ERROR", 1)
         assigned_model = phase_cfg.get("model")
         if not assigned_model:
             print(f"STOP — phase '{next_phase}' has no model assignment")
-            return 1
+            return _return_with_ledger(ledger_mode, rd, "ERROR", 1)
         try:
             _require_upstream_artifacts(rd, next_phase, pipeline)
         except RuntimeError as e:
             print(f"STOP — {e}")
-            return 1
+            return _return_with_ledger(ledger_mode, rd, "ERROR", 1)
 
         phase_idx = phase_order.index(next_phase) if next_phase in phase_order else 0
         artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}.md"
@@ -72,14 +102,17 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
                 extra_context=task if (next_phase == "clarify" and task) else None)
         except RuntimeError as e:
             print(f"STOP — OT dispatch failed: {e}")
-            return 1
+            return _return_with_ledger(ledger_mode, rd, "ERROR", 1)
 
         _audit_and_write_metadata(rd, next_phase, session_id, assigned_model,
                                   models_registry, pipeline, audit_fn,
                                   provenance_verified)
         receipt = _tof_validate(tof_bin, rd, pipeline_path, models_path)
         print(json.dumps(receipt, indent=2))
-        return 0 if receipt.get("validation", {}).get("status") == "PASS" else 1
+        status = receipt.get("validation", {}).get("status")
+        return _return_with_ledger(
+            ledger_mode, rd, status, 0 if status == "PASS" else 1
+        )
 
     max_iter = 20
     last_phase = None
@@ -97,7 +130,7 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
         # Terminal: pipeline complete
         if status == "PASS" and frontier and frontier.get("phase") in ("verify", "deposition"):
             print("DONE — pipeline complete.")
-            return 0
+            return _return_with_ledger("full-seri", rd, status, 0)
 
         # Terminal: INVALID artifact
         if status == "INVALID":
@@ -105,7 +138,7 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
             print(f"STOP — INVALID artifact. Reasons:")
             for r in reasons:
                 print(f"  - {r}")
-            return 1
+            return _return_with_ledger("full-seri", rd, status, 1)
 
         # Terminal: PENDING — start from clarify
         if status == "PENDING":
@@ -113,13 +146,13 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
         elif status == "BLOCKING":
             if not next_allowed:
                 print("STOP — BLOCKING with no next phase, escalation required.")
-                return 1
+                return _return_with_ledger("full-seri", rd, status, 1)
             next_phase = next_allowed[0]
         elif next_allowed:
             next_phase = next_allowed[0]
         else:
             print("STOP — unknown state.")
-            return 1
+            return _return_with_ledger("full-seri", rd, "ERROR", 1)
 
         if step_mode:
             print(f"  STEP: next phase = {next_phase}")
@@ -130,11 +163,11 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
         phase_cfg = pipeline["phases"].get(next_phase)
         if not phase_cfg:
             print(f"STOP — phase '{next_phase}' not found in pipeline.yaml")
-            return 1
+            return _return_with_ledger("full-seri", rd, "ERROR", 1)
         assigned_model = phase_cfg.get("model")
         if not assigned_model:
             print(f"STOP — phase '{next_phase}' has no model assignment")
-            return 1
+            return _return_with_ledger("full-seri", rd, "ERROR", 1)
 
         print(f"  → dispatching {next_phase} via {assigned_model} ...")
 
@@ -143,7 +176,7 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
             last_phase_count += 1
             if last_phase_count >= 3:
                 print(f"STOP — dispatching {next_phase} repeatedly ({last_phase_count}x) without progress")
-                return 1
+                return _return_with_ledger("full-seri", rd, "ERROR", 1)
         else:
             last_phase = next_phase
             last_phase_count = 0
@@ -158,7 +191,7 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
                                      extra_context=extra_context)
         except RuntimeError as e:
             print(f"STOP — OT dispatch failed: {e}")
-            return 1
+            return _return_with_ledger("full-seri", rd, "ERROR", 1)
 
         _audit_and_write_metadata(rd, next_phase, session_id, assigned_model,
                                   models_registry, pipeline, audit_fn,
@@ -167,7 +200,7 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
         time.sleep(0.5)
 
     print("STOP — max iterations reached.")
-    return 1
+    return _return_with_ledger("full-seri", rd, "ERROR", 1)
 
 
 # ---------------------------------------------------------------------------
