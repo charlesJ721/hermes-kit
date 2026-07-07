@@ -1502,6 +1502,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_run = sub.add_parser("run", help="orchestrate a TOF run (receipt-driven loop)")
     p_run.add_argument("run_dir", help="TOF run directory")
     p_run.add_argument("--step", action="store_true", help="single-step, one phase only")
+    p_run.add_argument("--only", type=str, default=None,
+                       help="dispatch only this phase (e.g., review, scout, establish)")
     p_run.add_argument("--task", type=str, default=None, help="task description for the clarify phase")
 
     args = parser.parse_args(argv)
@@ -1515,7 +1517,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return lint_pipeline(override_pipeline=args.pipeline)
     if args.command == "run":
         from orchestrator import run as orch_run
-        return orch_run(args.run_dir, step_mode=args.step, task=args.task)
+        return orch_run(args.run_dir, step_mode=args.step, task=args.task,
+                        only_phase=args.only)
     parser.error("unknown command")
     return 2
 

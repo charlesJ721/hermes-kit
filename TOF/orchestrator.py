@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
+        only_phase: Optional[str] = None,
         audit_fn: Optional[Callable[[str, str, str, Dict[str, Dict[str, Any]]], Tuple[Any, Dict[str, Any]]]] = None) -> int:
     """Orchestrate a TOF run to completion (or single step)."""
     rd = Path(run_dir).resolve()
@@ -40,6 +41,45 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
     pipeline = _load_pipeline(snap_dir)
     models_registry = _load_models(snap_dir)
     phase_order = list(pipeline.get("phases", {}).keys())
+
+    if only_phase:
+        next_phase = only_phase.strip().lower()
+        phase_cfg = pipeline.get("phases", {}).get(next_phase)
+        if not phase_cfg:
+            print(f"STOP — phase '{next_phase}' not found in pipeline.yaml")
+            return 1
+        assigned_model = phase_cfg.get("model")
+        if not assigned_model:
+            print(f"STOP — phase '{next_phase}' has no model assignment")
+            return 1
+        try:
+            _require_upstream_artifacts(rd, next_phase, pipeline)
+        except RuntimeError as e:
+            print(f"STOP — {e}")
+            return 1
+
+        phase_idx = phase_order.index(next_phase) if next_phase in phase_order else 0
+        artifact_name = f"{phase_idx:02d}-{next_phase.capitalize()}.md"
+        artifact_path = rd / artifact_name
+        dispatch_pipeline = dict(pipeline)
+        dispatch_pipeline["timeout_policy"] = dict(pipeline.get("timeout_policy", {}) or {}, max_retries=0)
+
+        print(f"  ONLY: dispatching {next_phase} via {assigned_model} ...")
+        try:
+            session_id, provenance_verified = _dispatch_ot(
+                tof_bin.parent, next_phase, assigned_model, artifact_path, rd,
+                dispatch_pipeline, models_registry,
+                extra_context=task if (next_phase == "clarify" and task) else None)
+        except RuntimeError as e:
+            print(f"STOP — OT dispatch failed: {e}")
+            return 1
+
+        _audit_and_write_metadata(rd, next_phase, session_id, assigned_model,
+                                  models_registry, pipeline, audit_fn,
+                                  provenance_verified)
+        receipt = _tof_validate(tof_bin, rd, pipeline_path, models_path)
+        print(json.dumps(receipt, indent=2))
+        return 0 if receipt.get("validation", {}).get("status") == "PASS" else 1
 
     max_iter = 20
     last_phase = None
@@ -120,35 +160,9 @@ def run(run_dir: str, step_mode: bool = False, task: Optional[str] = None,
             print(f"STOP — OT dispatch failed: {e}")
             return 1
 
-        # Session audit
-        try:
-            if audit_fn is None:
-                from session_audit_adapter import read_session as audit
-            else:
-                audit = audit_fn
-
-            log_path = os.path.expanduser(
-                pipeline.get("dispatch", {}).get("audit_log_path", "~/.hermes/logs/agent.log")
-            )
-            outcome, result = audit(session_id, log_path, assigned_model, models_registry)
-            _write_metadata(rd, next_phase, session_id, result, provenance_verified)
-            print(f"  metadata: actual={result['actual_model']} "
-                  f"outcome={outcome.value} "
-                  f"confidence={result['verification_confidence']}")
-        except Exception as e:
-            print(f"  WARNING: session audit failed ({e}), continuing")
-            # Write EXCEPTION metadata so validator knows audit was attempted
-            _write_metadata(rd, next_phase, session_id, {
-                "actual_model": None,
-                "actual_family": None,
-                "fallback_detected": None,
-                "provider": None,
-                "latency_ms": None,
-                "verification_confidence": 0.0,
-                "method": "exception",
-                "outcome": "exception",
-                "exception": str(e),
-            })
+        _audit_and_write_metadata(rd, next_phase, session_id, assigned_model,
+                                  models_registry, pipeline, audit_fn,
+                                  provenance_verified)
 
         time.sleep(0.5)
 
@@ -178,6 +192,94 @@ def _find_tof_bin() -> Path:
         if cand.exists():
             return cand.resolve()
     raise FileNotFoundError("cannot find tof script relative to orchestrator")
+
+
+def _audit_and_write_metadata(
+    run_dir: Path,
+    phase: str,
+    session_id: str,
+    assigned_model: str,
+    models_registry: Dict[str, Dict[str, Any]],
+    pipeline: Dict[str, Any],
+    audit_fn: Optional[Callable[[str, str, str, Dict[str, Dict[str, Any]]], Tuple[Any, Dict[str, Any]]]],
+    provenance_verified: Optional[bool],
+) -> None:
+    """Run SessionAuditAdapter and write phase metadata, fail-soft on audit errors."""
+    try:
+        if audit_fn is None:
+            from session_audit_adapter import read_session as audit
+        else:
+            audit = audit_fn
+
+        log_path = os.path.expanduser(
+            pipeline.get("dispatch", {}).get("audit_log_path", "~/.hermes/logs/agent.log")
+        )
+        outcome, result = audit(session_id, log_path, assigned_model, models_registry)
+        _write_metadata(run_dir, phase, session_id, result, provenance_verified)
+        print(f"  metadata: actual={result['actual_model']} "
+              f"outcome={outcome.value} "
+              f"confidence={result['verification_confidence']}")
+    except Exception as e:
+        print(f"  WARNING: session audit failed ({e}), continuing")
+        # Write EXCEPTION metadata so validator knows audit was attempted.
+        _write_metadata(run_dir, phase, session_id, {
+            "assigned_model": assigned_model,
+            "actual_model": None,
+            "actual_family": None,
+            "fallback_detected": None,
+            "provider": None,
+            "latency_ms": None,
+            "verification_confidence": 0.0,
+            "method": "exception",
+            "outcome": "exception",
+            "exception": str(e),
+        }, provenance_verified)
+
+
+def _require_upstream_artifacts(run_dir: Path, phase: str, pipeline: Dict[str, Any]) -> None:
+    """Fail clearly if a single-phase dispatch is missing required inputs."""
+    required = (pipeline.get("phases", {}).get(phase, {})
+                .get("inputs", {}).get("required", [])) or []
+    missing = []
+    for upstream_phase in required:
+        if _find_artifact_for_phase(run_dir, upstream_phase, pipeline) is None:
+            artifact_name = (pipeline.get("phases", {}).get(upstream_phase, {})
+                             .get("artifact", f"{upstream_phase}.md"))
+            missing.append(f"{upstream_phase} ({artifact_name})")
+    if missing:
+        raise RuntimeError(
+            f"--only {phase} requires upstream artifact(s): {', '.join(missing)}"
+        )
+
+
+def _find_artifact_for_phase(run_dir: Path, phase: str,
+                             pipeline: Dict[str, Any]) -> Optional[Path]:
+    """Find an artifact by phase frontmatter, falling back to configured filename."""
+    for f in sorted(run_dir.glob("*.md"), reverse=True):
+        try:
+            import yaml
+            text = f.read_text()
+            if not text.startswith("---"):
+                continue
+            end = text.find("---", 3)
+            if end <= 0:
+                continue
+            fm = yaml.safe_load(text[3:end]) or {}
+            if fm.get("tof", {}).get("phase") == phase:
+                return f
+        except Exception:
+            continue
+    artifact_name = pipeline.get("phases", {}).get(phase, {}).get("artifact")
+    candidates = []
+    if artifact_name:
+        candidates.append(run_dir / artifact_name)
+    phases = list((pipeline.get("phases", {}) or {}).keys())
+    phase_idx = phases.index(phase) if phase in phases else 0
+    candidates.append(run_dir / f"{phase_idx:02d}-{phase.capitalize()}.md")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -431,20 +533,12 @@ def _build_upstream_context(run_dir: Path, phase: str, pipeline: Dict[str, Any])
 
     context_parts = []
     for src_phase in required:
-        # Find artifact for this source phase in run_dir
-        for f in sorted(run_dir.glob("*.md"), reverse=True):
-            try:
-                import yaml
-                text = f.read_text()
-                if text.startswith("---"):
-                    end = text.find("---", 3)
-                    if end > 0:
-                        fm = yaml.safe_load(text[3:end]) or {}
-                        if fm.get("tof", {}).get("phase") == src_phase:
-                            context_parts.append(f"### {src_phase}\n\n{text[end+3:].strip()}")
-                            break
-            except Exception:
-                continue
+        f = _find_artifact_for_phase(run_dir, src_phase, pipeline)
+        if f is not None:
+            text = f.read_text()
+            end = text.find("---", 3) if text.startswith("---") else -1
+            body = text[end+3:].strip() if end > 0 else text.strip()
+            context_parts.append(f"### {src_phase}\n\n{body}")
 
     return "\n\n".join(context_parts)
 
