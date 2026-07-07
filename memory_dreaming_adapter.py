@@ -319,22 +319,26 @@ def _apply_review_gates(actions: List[Action]) -> List[Action]:
     for action in actions:
         desc = action.description.lower()
         targets_str = ' '.join(action.targets)
-        
-        # Gate 1: Triage rules
+
+        # All action types that mutate MEMORY.md / USER.md on disk.
+        # LINK, CREATE, UPDATE are SQLite-only and non-destructive.
+        _MUTATING = frozenset({"COMPRESS", "REMOVE", "MERGE", "DEDUP"})
+
+        # Gate 1: Triage rules — any mutation could change behavioral threshold
         if re.search(r'triage|行为准则|who.*how', targets_str + desc):
-            if action.action_type in ("COMPRESS", "REMOVE"):
+            if action.action_type in _MUTATING:
                 action.blocked_by_gemini = True
-                action.gemini_reason = "BLOCKING: Triage rule — compression must not change behavioral threshold (Constitution Art.1)"
+                action.gemini_reason = "BLOCKING: Triage rule — mutation must not change behavioral threshold (Constitution Art.1)"
                 action.risk = "BLOCKED"
-        
-        # Gate 2: Active environment limitations
+
+        # Gate 2: Active environment limitations — removal only (compression ok)
         if re.search(r'SSH|frp|frpc|TCC|环境', targets_str):
             if action.action_type == "REMOVE":
                 action.blocked_by_gemini = True
                 action.gemini_reason = "BLOCKING: Active environment limitation — keep while upstream unresolved (Constitution Art.2)"
                 action.risk = "BLOCKED"
-        
-        # Gate 3: System authorization
+
+        # Gate 3: System authorization — must migrate before removal
         if re.search(r'TCC|adhoc.*签名|授权', targets_str):
             if action.action_type == "REMOVE":
                 action.blocked_by_gemini = True
@@ -355,10 +359,11 @@ def _apply_review_gates(actions: List[Action]) -> List[Action]:
 # ---------------------------------------------------------------------------
 
 def _backup(path: Path) -> None:
-    """Create timestamped backup."""
+    """Create timestamped backup with seconds to avoid same-day collision."""
     if not path.exists():
         return
-    backup = path.with_suffix(f".md.dreaming-backup-{date.today().isoformat()}")
+    ts = datetime.now().strftime("%Y-%m-%dT%H%M%S")
+    backup = path.with_suffix(f".md.dreaming-backup-{ts}")
     backup.write_text(path.read_text())
 
 
@@ -398,16 +403,24 @@ def _execute_action(action: Action, mem_path: Path, user_path: Path) -> None:
 
 
 def _remove_memory_entry(path: Path, idx: int) -> None:
-    """Remove entry at index, handling §-separated format.
-    
-    Removal is done by delimiter-based splitting to avoid index shift
-    when removing multiple entries. Entries are identified by § separator.
+    """Remove entry at index, using same filtered indexing as _load_all_entries.
+
+    _load_all_entries strips empty § segments and assigns sequential indices
+    to the remaining non-empty parts.  This function mirrors that: it filters
+    empty parts, locates the entry at `idx`, then removes it by substring
+    replacement in the original content (avoiding §-split index drift).
     """
     content = path.read_text()
-    parts = content.split('§')
-    if idx < len(parts):
-        del parts[idx]
-        path.write_text('§'.join(parts))
+    raw_parts = content.split('§')
+    # Build the filtered index → raw_index mapping
+    filtered = [(ri, p) for ri, p in enumerate(raw_parts) if p.strip()]
+    if idx < len(filtered):
+        ri, target = filtered[idx]
+        # Remove the target part: replace the exact segment delimited by §
+        # Find the substring in original content and remove it
+        before = '§'.join(raw_parts[:ri])
+        after = '§'.join(raw_parts[ri + 1:])
+        path.write_text(before + after if before.endswith('§') or not after else before + '§' + after)
     # else: entry already gone or index invalid — no-op
 
 
