@@ -1,83 +1,112 @@
 ---
 tof:
-  run_id: "tof-mindmemos"
-  phase: "review"
-  schema_version: "0.1"
+  run_id: "trigger-layer-review-2026-07-07"
+  phase: review
   round: 1
-  produced_by:
-    adapter: "fake"
-    assigned_model: "google/gemini-3.1-pro-preview"
-    claimed_model: "google/gemini-3.1-pro-preview"
-    assigned_family: "gemini"
-    actual_family: "gemini"
-  inputs:
-    - phase: "establish"
-      path: "TOF/PLAN.md"
+  reviewer: "openai/gpt-5.5"
+  reviewed_range: "e38a2c2..ec138af"
+  created_at: "2026-07-07T13:48:07Z"
 review:
-  verdict: "APPROVED_WITH_MODIFICATIONS"
-  adversarial_findings:
-    - id: "finding-p0-safety"
-      severity: "critical"
-      target_step: "p0-current-adapter-hardening"
-      finding: "The current memory_dreaming_adapter.py has a critical execution bug. The json.load reconstruction in CLI lacks the explicit '__init__()' mapping for 'id' to 'action_id'. Calling --safe-only crashes with 'TypeError: __init__() got an unexpected keyword argument 'id''. We cannot build v2 on an adapter that crashes in its execution path."
-      recommendation: "P0 must include fixing the dict expansion in the '--safe-only' CLI block so 'id' maps to 'action_id'. The current test suite must add a test covering execution, not just dry runs."
-    - id: "finding-split-brain"
-      severity: "high"
-      target_step: "p2-quality-signals"
-      finding: "fact_store is read directly via sqlite3 in _load_all_entries(), but facts are missing index values mapping back to MEMORY / USER indices. If memory_entry_hashes or memory_quality_signals uses entry_refs like 'FACT[10]', it's brittle if fact_store dynamically changes rowids. fact_store uses fact_id as primary key, which is stable, but linking it via string 'FACT[10]' loses referential integrity if the SQLite scheme evolves."
-      recommendation: "Ensure entry_refs natively map to 'fact_id' in a standard way, and document that fact_store modifications MUST cascade or orphans will exist in memory_entry_hashes."
-    - id: "finding-content-hash-risk"
-      severity: "medium"
-      target_step: "p1-entry-identity-and-content-hash"
-      finding: "Content hash normalization strips whitespace, but trailing/leading metadata (like timestamps) aren't handled predictably across MEMORY vs USER. The plan mentions stripping volatile date prefixes 'only when explicitly marked as metadata', but flat text lacks metadata boundaries. This will cause false deduplication misses."
-      recommendation: "Add a clear regex whitelist for date prefix stripping (e.g., '(YYYY-MM-DD)') in _normalize_content rather than relying on abstract 'metadata' markers."
-    - id: "finding-deep-mode-dependency"
-      severity: "low"
-      target_step: "p5-optional-dual-llm-dreaming"
-      finding: "Using `subprocess.run(['hermes', 'chat', '-q', ...])` adds no Python package, but it tightly couples the database logic to the CLI process context. If run via cron, the environment might lack the correct Hermes profile or auth context."
-      recommendation: "Deep mode must explicitly pass '--profile' or inherit the environment carefully. Added risk is acceptable given it's opt-in."
-    - id: "finding-destructive-bypass"
-      severity: "high"
-      target_step: "p4-detect-then-act-pipeline"
-      finding: "The plan proposes moving issue detection and action planning out, but _apply_review_gates still operates on the final actions. If the LLM proposes a 'RELOCATE', but _apply_review_gates only checks 'COMPRESS' or 'REMOVE' (as it does currently for Triage rules), a destructive action could slip through."
-      recommendation: "Expand all four BLOCKING gates in _apply_review_gates to inspect all file-mutating action types (MERGE, COMPRESS, REMOVE, DEDUP, UPDATE), ensuring no destructive action is missed."
-  verification_adjustments:
-    - "Add test: 'python3 memory_dreaming_adapter.py --safe-only' runs without crashing on an empty actions list or mock actions."
-    - "Add test: verify _apply_review_gates blocks a DEDUP action containing a Triage rule target."
-  next_phase_guidance: "Implement phase MUST fix the CLI dict expansion bug in P0 before writing any new architecture. Do not skip tests for execute_safe_actions()."
+  verdict: WEAKNESS_FOUND
+  findings:
+    - type: ci_guardrail
+      severity: high
+      description: ".github/workflows/review-required.yml accepts any pre-existing TOF/REVIEW.md or REVIEW.md when the current diff does not include a review file, so later core-file pushes can pass with a stale review artifact rather than an accompanying family-different review."
+      evidence: "review-required.yml lines 49-58: after checking git diff for REVIEW.md, the workflow falls back to any existing TOF/REVIEW.md or REVIEW.md in the checked-out tree."
+      recommendation: "Require REVIEW.md to be changed in the same diff for core-file changes, or validate that the review artifact references the current HEAD/range. Do not fall back to an unchanged repository file."
+    - type: dispatch_command_quoting
+      severity: medium
+      description: "dispatch.command_template quoting is brittle: _build_dispatch_command shlex-quotes the prompt and then substitutes it inside a template that already surrounds {prompt} with double quotes. Prompts containing apostrophes can raise ValueError, and even simple prompts are passed with literal quote characters."
+      evidence: "orchestrator.py lines 337-344 plus pipeline.yaml line 48. Reproduction: _build_dispatch_command(..., \"Bob's task\", ...) raises ValueError: No closing quotation."
+      recommendation: "Do not nest shell quoting. Prefer argv templates or substitute an unquoted prompt into an argv list; if keeping a shell-like template, remove the literal quotes around {prompt} and add tests for apostrophes/newlines."
+    - type: ledger_test_isolation
+      severity: low
+      description: "The execution ledger path is hardcoded to ~/.hermes/tof-execution-ledger.jsonl, so tests or local dry runs mutate real operator telemetry and triage-stats output. This does not break runtime behavior, but it weakens ledger usefulness."
+      evidence: "orchestrator.py line 20 and tof line 1487 define fixed ledger paths; running the integration tests appended full-seri entries visible via tof triage-stats."
+      recommendation: "Allow TOF_LEDGER_PATH or an injected ledger path for tests, defaulting to ~/.hermes/tof-execution-ledger.jsonl for normal use."
+  blocking: []
 ---
-# TOF Review Report — Hermes Memory System v2
 
-## 1. Safety and Execution Context (P0 Focus)
+# TOF Review — trigger-layer changes e38a2c2..ec138af
 
-The Establish plan correctly identified that hardening the current adapter (P0) is a prerequisite. However, it missed a critical, verifiable bug currently in production: **the `--safe-only` execution path crashes immediately.**
+## Verdict
 
-By running `python3 memory_dreaming_adapter.py --safe-only` in the workspace, I verified it crashes with `TypeError: __init__() got an unexpected keyword argument 'id'`. This happens because `json.dumps` aliases `action_id` to `id`, but the reconstruction logic `Action(**{k: v for k, v in a.items() if k != 'blocked'})` passes `id` directly to `Action()`, which expects `action_id`.
+**WEAKNESS_FOUND** — the trigger-layer design mostly satisfies the imposed architectural constraints, but I found three concrete weaknesses before this should be treated as a reliable guardrail/telemetry layer.
 
-**Mandatory Change:** Implementation MUST fix this dict expansion bug in P0. We cannot build architecture on a broken executor.
+## Scope reviewed
 
-## 2. Split-Brain Risk with `fact_store`
+- `orchestrator.py`: `run(..., only_phase=...)`, `run_triage()`, execution ledger helpers, metadata/audit path, upstream artifact discovery.
+- `tof`: `run --only`, `triage`, `triage-stats`, `phase_items()` triage exclusion.
+- `pipeline.yaml`: standalone `triage` phase insertion.
+- `phases/triage/prompt.md`: adversarial routing advisor prompt.
+- `.github/workflows/review-required.yml`: CI review-required guardrail.
 
-P3 proposes adding `memory_relations`, `memory_quality_signals`, and `memory_entry_hashes` to the existing SQLite `memory_store.db`. This is correct ("万源归宗"), but using string `entry_ref` values like "FACT[10]" to reference `fact_store.facts(fact_id)` creates a weak link.
-*   **Risk:** SQLite `fact_store` handles its own lifecycle. If a fact is deleted via `fact_store` APIs, orphaned rows will pollute the new `memory_*` tables.
-*   **Adjustment:** Document and enforce that `memory_entry_hashes` and `memory_relations` act as non-authoritative fast-lookups. If a referenced `FACT[10]` is missing from the core `facts` table during load, the orphaned signal rows should be cleared harmlessly.
+## Positive assessment
 
-## 3. False Deduplication Misses (P1 Focus)
+- `tof run --only <phase>` is intentionally single-dispatch: it creates a dispatch pipeline with `timeout_policy.max_retries=0`, dispatches one phase, audits metadata, validates once, and returns. I did not see phase cascade or mini-SERI behavior in this path.
+- `run_triage()` correctly avoids `_dispatch_ot()`, does not create a run directory artifact, and does not write session provenance metadata. It is advisory-only by construction.
+- The ledger write is best-effort and fail-soft (`try/except Exception: pass`), matching the stated constraint that ledger failure must not break TOF runs.
+- The triage prompt is narrow and explicitly asks for the cheapest route that addresses a concrete blind spot, which is aligned with the trigger-layer goal.
+- `phase_items()` excludes `triage`, preventing the advisory phase from becoming part of the main validator DAG.
 
-P1 proposes `_normalize_content` to strip volatile date prefixes "only when explicitly marked as metadata, not inside fact content." Since `MEMORY.md` is plain flat text, this distinction is impossible without explicit regex.
+## Findings
 
-*   **Risk:** Without a concrete date-stripping regex, `(2026-07-01) VPS setup` and `(2026-07-02) VPS setup` will hash differently, defeating the exact-dedup fast path.
-*   **Adjustment:** Implement a hardcoded regex whitelist for known date prefixes (e.g., `(YY/MM/DD)`, `(YYYY-MM-DD)`) in the normalization function.
+### 1. CI guardrail can pass stale reviews (high)
 
-## 4. Destructive Bypass in Review Gates (P4 Focus)
+The workflow checks whether a `REVIEW.md` appears in the current diff, but if none is changed it falls back to any existing `TOF/REVIEW.md` or root `REVIEW.md` in the repository. That means a later push touching `TOF/orchestrator.py`, `TOF/tof`, `TOF/pipeline.yaml`, adapters, or `TOF/phases/**` can pass without updating the review artifact, as long as an old review file already exists.
 
-P4 splits detect from act, which is excellent. However, `_apply_review_gates` is currently hardcoded in its conditionals (e.g., Gate 1 only blocks `COMPRESS` and `REMOVE`). P3 introduces `MERGE` and `DEDUP`.
+This conflicts with the stated purpose: core-file changes must be **accompanied** by a family-different review. Presence is not accompaniment.
 
-*   **Risk:** If the new action taxonomy is not fully respected by the old gates, an LLM could propose a `MERGE` or `RELOCATE` on a protected Triage rule, and the gate would happily pass it because it only checks for `COMPRESS/REMOVE`.
-*   **Adjustment:** The `_apply_review_gates` function MUST be updated alongside the action taxonomy expansion to ensure **all file-mutating operations** involving protected entities are strictly policed.
+Recommended fix: remove the fallback-to-existing-file branch, or require the review frontmatter to name the current `BASE..HEAD` range / current HEAD SHA and check that in CI.
 
-## 5. Summary
+### 2. `dispatch.command_template` prompt quoting is brittle (medium)
 
-The Establish architecture is sound and strictly adheres to the "no new isolated apps" (万源归宗) philosophy. The decision to use SQLite side tables attached to the existing event loop rather than introducing Qdrant or Neo4j is accurate for the current scale.
+`_build_dispatch_command()` applies `shlex.quote(prompt)` and substitutes that into the template. The default template in `pipeline.yaml` already quotes `{prompt}`:
 
-I assign `APPROVED_WITH_MODIFICATIONS`. Proceed to Implement, but P0 must contain the executor crash fix.
+```yaml
+dispatch:
+  command_template: 'hermes chat -q "{prompt}" --provider {provider} --model {model}'
+```
+
+This double quoting produced two problems under direct reproduction:
+
+- `hello world` becomes an argv item containing literal quote characters: `"'hello world'"`.
+- `Bob's task` raises `ValueError: No closing quotation` during `shlex.split()`.
+
+This affects both normal dispatch and `tof triage`, because triage uses the same `_build_dispatch_command()` helper. It is not a mini-SERI violation, but it is a real reliability bug in the trigger layer.
+
+Recommended fix: treat command templates as argv templates rather than shell strings, or remove the literal quotes around `{prompt}` in `pipeline.yaml` and add regression tests for apostrophes, quotes, and multiline prompts.
+
+### 3. Ledger telemetry is not test-isolated (low)
+
+The ledger is hardcoded in both `orchestrator.py` and `tof` to `~/.hermes/tof-execution-ledger.jsonl`. Because `run()` now writes the ledger unconditionally on terminal paths, integration tests and local dry runs mutate the user's real ledger. I observed `tof triage-stats` reporting entries created by local test execution.
+
+This does not violate the best-effort/silent-failure requirement. It does weaken the accuracy of `triage-stats` as operational telemetry.
+
+Recommended fix: support `TOF_LEDGER_PATH` or injection for tests, with the current path as the production default.
+
+## Constraint check
+
+| Constraint | Assessment |
+|---|---|
+| `--only` must not become mini-SERI | **Pass.** Single dispatch, no phase cascade; retries are disabled for the dispatch path. |
+| `run_triage` must not use `_dispatch_ot` | **Pass.** It builds a command directly and returns parsed JSON only. |
+| Ledger must be best-effort | **Pass.** Ledger write is fail-soft. |
+| CI guardrail scope must be narrow | **Partially pass.** Path scope is narrow, but the stale-review fallback weakens enforcement. |
+
+## Validation performed
+
+Commands run from `/Users/ArsLonga/Projects/hermes-kit/TOF`:
+
+```bash
+python3 -m py_compile orchestrator.py tof
+python3 tof lint-pipeline
+python3 tests_expected.py
+python3 test_orchestrator_unit.py
+python3 test_orchestrator_integration.py
+python3 tof --help
+python3 tof run --help
+python3 tof triage-stats
+```
+
+Results: lint passed, expected fixture semantics passed, 26 unit tests passed, and 4 integration tests passed. The quoting issue was found with a targeted direct call to `_build_dispatch_command()`.
