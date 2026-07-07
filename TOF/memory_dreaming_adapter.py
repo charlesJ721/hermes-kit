@@ -132,6 +132,7 @@ def dream(mem_path: str = "~/.hermes/memories/MEMORY.md",
             "risk": a.risk,
             "blocked": a.blocked_by_gemini,
             "after": a.after_text if a.action_type != "REMOVE" else "[REMOVED]",
+            "before_texts": a.before_texts,
         } for a in actions],
         "total_savings": total_savings,
         "blocked_actions": len(blocked),
@@ -463,10 +464,19 @@ if __name__ == "__main__":
     report = dream(dry_run=not args.safe_only)
     
     if args.safe_only:
-        actions = [Action(**{k: v for k, v in a.items() if k != 'blocked'}) 
-                   for a in report['actions']]
-        for a in actions:
-            a.blocked_by_gemini = report['actions'][actions.index(a)].get('blocked', False)
+        # Map report dict keys to Action dataclass fields
+        # Report: {id, type, targets, description, char_savings, risk, blocked, after}
+        # Action:  {action_id, action_type, targets, description, after_text, char_savings, risk, blocked_by_gemini, before_texts}
+        field_map = {'id': 'action_id', 'type': 'action_type', 'after': 'after_text', 'blocked': 'blocked_by_gemini'}
+        actions = []
+        for a in report['actions']:
+            mapped = {}
+            for k, v in a.items():
+                new_k = field_map.get(k, k)
+                mapped[new_k] = v
+            mapped.setdefault('before_texts', [])
+            mapped.setdefault('gemini_reason', '')
+            actions.append(Action(**mapped))
         exec_report = execute_safe_actions(actions)
         report.update(exec_report)
     
@@ -484,12 +494,12 @@ if __name__ == "__main__":
         if blocked:
             print(f"\n### BLOCKED (Review gates) ###")
             for a in blocked:
-                print(f"  [{a['id']}] {a['description']}")
+                print(f"  [{a.get('id', a.get('action_id', '?'))}] {a['description']}")
         
         if safe:
             print(f"\n### Safe Actions (can execute with --safe-only) ###")
             for a in safe:
-                print(f"  [{a['id']}] {a['type']}: {a['description']} ({a['char_savings']} chars, {a['risk']})")
+                print(f"  [{a.get('id', a.get('action_id', '?'))}] {a.get('type', a.get('action_type', '?'))}: {a['description']} ({a['char_savings']} chars, {a['risk']})")
         
         if not args.safe_only:
             print(f"\nRun with --safe-only to execute the {len(safe)} safe actions.")
