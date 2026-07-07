@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Patterns that indicate an entry is stale/obsolete
 STALE_PATTERNS: List[Tuple[str, str]] = [
-    (r"adhoc.*签名", "TCC adhoc signing — one-shot system authorization"),
+    (r"adhoc.*signing", "One-shot system authorization — transient credential"),
     (r"测试密码", "Test credential — must verify before removal"),
     (r"已停用|已废弃|\(deprecated\)|\(obsolete\)", "Explicitly marked as deprecated"),
     (r"workaround.*obsolete|不再需要", "Workaround no longer needed"),
@@ -61,11 +61,11 @@ RED_LINE_PATTERNS: List[str] = [
 # Cross-system duplication: same fact in MEMORY + USER + fact_store
 # Key: canonical topic, Value: (memory_keyword, user_keyword, fact_keyword)
 DUPLICATE_TOPICS: List[Tuple[str, str, str, str]] = [
-    ("VPS/proxy", "BandwagonHost|Xray|VLESS|SOCKS5|代理", "VPS.*CN2|搬瓦工", "VPS.*CN2|代理.*mihomo"),
-    ("设计哲学", "万源归宗|架构偏好", "万源归宗|设计哲学", "万源归宗"),
-    ("Triage", "Triage纪律|who在how前", "Triage纪律|who在how前", "行为准则|who.*how"),
-    ("GitHub/cron", "digital-twin.*cron|GitHub", "digital-twin|GitHub", ""),
-    ("网络路由", "Xray|SOCKS5|NO_PROXY|OR走VPS", "", "代理.*mihomo|境外API"),
+    ("VPS/proxy", "VPS.*provider|PROXY.*config", "VPS.*setup|proxy.*config", "VPS.*provider|proxy.*config"),
+    ("design philosophy", "architecture.*preference|design.*principle", "architecture.*preference|design.*philosophy", "architecture.*preference"),
+    ("Triage", "triage.*discipline|who.*before.*how", "triage.*discipline|who.*before.*how", "behavior.*rule|who.*how"),
+    ("CI/CD deploy", "project.*cron|deploy", "project|deploy", ""),
+    ("network routing", "proxy.*config|NO_PROXY|routing", "", "API.*routing|proxy.*config"),
 ]
 
 
@@ -97,8 +97,8 @@ class Action:
 # Public interface
 # ---------------------------------------------------------------------------
 
-def dream(mem_path: str = "~/.hermes/memories/MEMORY.md",
-          user_path: str = "~/.hermes/memories/USER.md",
+def dream(mem_path: str = "<agent_memory_dir>/MEMORY.md",
+          user_path: str = "<agent_memory_dir>/USER.md",
           dry_run: bool = True) -> Dict[str, Any]:
     """Run the full dreaming cycle: discover → classify → plan.
     
@@ -144,8 +144,8 @@ def dream(mem_path: str = "~/.hermes/memories/MEMORY.md",
 
 
 def execute_safe_actions(actions: List[Action], 
-                         mem_path: str = "~/.hermes/memories/MEMORY.md",
-                         user_path: str = "~/.hermes/memories/USER.md") -> Dict[str, Any]:
+                         mem_path: str = "<agent_memory_dir>/MEMORY.md",
+                         user_path: str = "<agent_memory_dir>/USER.md") -> Dict[str, Any]:
     """Execute only LOW and MEDIUM risk actions. HIGH/BLOCKED actions are skipped.
     
     WARNING: This modifies MEMORY.md and USER.md on disk.
@@ -201,7 +201,7 @@ def _load_all_entries(mem_path: Path, user_path: Path) -> List[Entry]:
     
     # Load fact_store from Holographic memory DB
     try:
-        db_path = Path.home() / ".hermes" / "memory_store.db"
+        db_path = Path.home() / "<agent_memory_dir>" / "memory_store.db"
         conn = sqlite3.connect(str(db_path))
         rows = conn.execute(
             'SELECT fact_id, content, category, tags, trust_score '
@@ -332,14 +332,14 @@ def _apply_review_gates(actions: List[Action]) -> List[Action]:
                 action.risk = "BLOCKED"
 
         # Gate 2: Active environment limitations — removal only (compression ok)
-        if re.search(r'SSH|frp|frpc|TCC|环境', targets_str):
+        if re.search(r'SSH|tunnel.*client|env.*setup|environment', targets_str):
             if action.action_type == "REMOVE":
                 action.blocked_by_gemini = True
                 action.gemini_reason = "BLOCKING: Active environment limitation — keep while upstream unresolved (Constitution Art.2)"
                 action.risk = "BLOCKED"
 
         # Gate 3: System authorization — must migrate before removal
-        if re.search(r'TCC|adhoc.*签名|授权', targets_str):
+        if re.search(r'system.*auth|adhoc.*signing|authorization', targets_str):
             if action.action_type == "REMOVE":
                 action.blocked_by_gemini = True
                 action.gemini_reason = "BLOCKING: Migrate to skill/vault first, not just cold-store (Constitution Art.3)"
