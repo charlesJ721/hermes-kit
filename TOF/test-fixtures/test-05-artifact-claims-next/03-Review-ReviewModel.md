@@ -14,7 +14,7 @@ tof:
   inputs:
     - phase: "establish"
       path: "02-Establish-EstModel.md"
-      sha256: "0a4c772ddf0cc1cfa67e00332d053e2437482add3d37768c7c8a0ec242d37fa7"
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
 review:
   verdict: "PASS"
   findings:

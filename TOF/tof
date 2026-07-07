@@ -485,6 +485,22 @@ def validate_schema(art: Artifact, phase_cfg: Dict[str, Any], reasons: List[str]
             ok = False
             reasons.append(f"missing or empty required field: {dotted}")
 
+    # required_if_verdict: conditional fields only required for specific verdicts
+    verdict_field = phase_cfg.get("verdict_field")
+    declared_verdict = None
+    if verdict_field:
+        try:
+            declared_verdict = str(get_path(art.frontmatter, str(verdict_field)))
+        except KeyError:
+            pass
+    required_if_verdict = phase_cfg.get("required_if_verdict", {}) or {}
+    if isinstance(required_if_verdict, dict) and declared_verdict:
+        conditional_fields = required_if_verdict.get(declared_verdict, []) or []
+        for dotted in conditional_fields:
+            if not isinstance(dotted, str) or not has_nonempty_path(art.frontmatter, dotted):
+                ok = False
+                reasons.append(f"missing or empty required field for verdict={declared_verdict}: {dotted}")
+
     # --- Echo detection: FILL WITH tokens remaining in frontmatter ---
     if _check_echo(art, reasons):
         ok = False
@@ -1210,6 +1226,20 @@ def lint_pipeline(override_pipeline: Optional[Path] = None) -> int:
         for dotted in cfg.get("required_fields", []) or []:
             if not dotted_path_is_valid(dotted):
                 errors.append(f"phase {name}: invalid required field path {dotted!r}")
+        required_if_verdict = cfg.get("required_if_verdict", {}) or {}
+        if isinstance(required_if_verdict, dict):
+            verdicts_dict = cfg.get("verdicts", {}) or {}
+            for verdict_val, fields in required_if_verdict.items():
+                if verdict_val not in verdicts_dict:
+                    errors.append(f"phase {name}: required_if_verdict.{verdict_val} is not a valid verdict")
+                if not isinstance(fields, list):
+                    errors.append(f"phase {name}: required_if_verdict.{verdict_val} must be a list")
+                    continue
+                for dotted in fields:
+                    if not dotted_path_is_valid(dotted):
+                        errors.append(f"phase {name}: invalid required_if_verdict.{verdict_val} path {dotted!r}")
+        elif required_if_verdict:
+            errors.append(f"phase {name}: required_if_verdict must be a mapping")
         verdict_field = cfg.get("verdict_field")
         if not dotted_path_is_valid(verdict_field):
             errors.append(f"phase {name}: invalid verdict_field {verdict_field!r}")

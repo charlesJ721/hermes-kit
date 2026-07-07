@@ -122,7 +122,9 @@ phases:
     required_fields:
       - review.verdict
       - review.findings
-      - review.blocking
+    required_if_verdict:
+      BLOCKING:
+        - review.blocking
     verdict_field: review.verdict
     model_policy:
       family_must_differ_from: establish
