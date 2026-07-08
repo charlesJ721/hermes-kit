@@ -22,7 +22,7 @@ _LEDGER_PATH = os.environ.get(
 )
 
 
-def _write_execution_ledger(mode: str, run_dir: str, status: str) -> None:
+def _write_execution_ledger(mode: str, run_dir: str, status: str, **extra_fields) -> None:
     """Append a best-effort execution record; never fail TOF runs."""
     try:
         entry = {
@@ -30,6 +30,7 @@ def _write_execution_ledger(mode: str, run_dir: str, status: str) -> None:
             "mode": mode,
             "run_dir": run_dir,
             "status": status,
+            **extra_fields,
         }
         with open(_LEDGER_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
@@ -419,6 +420,13 @@ def run_triage(task: str, pipeline: Dict[str, Any], models: Dict[str, Dict[str, 
     route = result.get("route", "self")
     if route not in valid_routes:
         route = "self"
+
+    # Write advisory ledger entry (best-effort, never blocks triage)
+    _write_execution_ledger(
+        "triage-advice", "advisory", "OK",
+        route=route,
+        blind_spot=str(result.get("blind_spot", "")),
+    )
 
     return {
         "route": route,

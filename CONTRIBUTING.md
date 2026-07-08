@@ -1,21 +1,29 @@
-# Contributing
+# Contributing to hermes-kit
 
-## TOF core changes require review
+## TOF Core File Changes
 
-Changes that touch TOF core files must include a `REVIEW.md` file in the same commit or pull request diff. The review should be produced by a model family different from the one that authored or implemented the change, and it must include a `review.verdict` or `verdict:` field.
+Any commit that modifies TOF core files must include a family-different REVIEW.md:
 
-The CI guard checks only the current diff for a `REVIEW.md`; a pre-existing `REVIEW.md` in the repository does not satisfy this requirement.
+### Core files (trigger CI review requirement)
+- `TOF/tof`
+- `TOF/orchestrator.py`
+- `TOF/pipeline.yaml`
+- `TOF/model_registry_adapter.py`
+- `TOF/session_audit_adapter.py`
+- `TOF/phases/**`
 
-## Generate `REVIEW.md`
-
-From the `TOF/` directory, run:
+### How to generate a REVIEW.md
 
 ```bash
+cd TOF
 tof run --only review <run_dir>
 ```
 
-Commit the generated `REVIEW.md` together with the TOF core-file changes it reviews.
+This dispatches a single-phase review by a family-different model (as configured in pipeline.yaml: review phase uses gemini-3.1-pro-preview, which differs from establish's gpt-5.5).
 
-## TOF docs
+The REVIEW.md must:
+1. Be included in the same commit diff as the core file changes
+2. Contain valid YAML frontmatter with `review.verdict` and `tof.reviewer` fields
+3. Be produced by a model whose family differs from the establish phase model (CI enforces this)
 
-See [`TOF/README.md`](TOF/README.md) for the TOF overview, validation checks, project structure, and usage examples.
+See TOF/CORE_CONCEPTS.md for the full trust-chain architecture.

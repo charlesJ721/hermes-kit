@@ -1541,6 +1541,24 @@ def triage_stats(ledger_path: Path = LEDGER_PATH) -> int:
         mode = str(entry.get("mode", ""))
         status = str(entry.get("status", ""))
         print(f"{timestamp:<32} {mode:<20} {status:<10}")
+
+    # Triage-advice statistics
+    triage_entries = [e for e in entries if str(e.get("mode") or "") == "triage-advice"]
+    if triage_entries:
+        route_counts: Dict[str, int] = {}
+        for e in triage_entries:
+            r = str(e.get("route") or "unknown")
+            route_counts[r] = route_counts.get(r, 0) + 1
+
+        review_only_advice = route_counts.get("review-only", 0)
+        actual_single_review = mode_counts.get("single-review", 0)
+
+        print(f"\nTriage advice ({len(triage_entries)} recommendations):")
+        for route in sorted(route_counts):
+            print(f"  {route}: {route_counts[route]}")
+        if review_only_advice > 0:
+            ratio = actual_single_review / review_only_advice
+            print(f"  → single-review dispatch rate vs triage review-only advice: {actual_single_review}/{review_only_advice} = {ratio:.1%}")
     return 0
 
 
