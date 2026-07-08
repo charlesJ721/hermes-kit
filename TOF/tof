@@ -1559,6 +1559,7 @@ def triage_stats(ledger_path: Path = LEDGER_PATH) -> int:
         if review_only_advice > 0:
             ratio = actual_single_review / review_only_advice
             print(f"  → single-review dispatch rate vs triage review-only advice: {actual_single_review}/{review_only_advice} = {ratio:.1%}")
+            print(f"     (explicit compliance rate within TOF; does not include chat-level self-execution outside tof run)")
     return 0
 
 

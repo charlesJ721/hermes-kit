@@ -86,14 +86,14 @@ jobs:
           # Parse YAML frontmatter (between --- markers)
           parts = content.split('---', 2)
           if len(parts) < 3:
-              print("::warning::REVIEW.md has no YAML frontmatter, skipping family check")
-              sys.exit(0)
+              print("::error::REVIEW.md has no YAML frontmatter; invalid review artifact")
+              sys.exit(1)
 
           fm = yaml.safe_load(parts[1])
           reviewer = (fm.get('tof') or {}).get('reviewer', '')
           if not reviewer:
-              print("::warning::REVIEW.md missing tof.reviewer field, skipping family check")
-              sys.exit(0)
+              print("::error::REVIEW.md missing tof.reviewer field; cannot verify reviewer family diversity")
+              sys.exit(1)
 
           # Load models.yaml
           with open('TOF/models.yaml') as f:
@@ -108,8 +108,8 @@ jobs:
                   break
 
           if not review_family:
-              print(f"::warning::Reviewer '{reviewer}' not found in models.yaml, skipping family check")
-              sys.exit(0)
+              print(f"::error::Reviewer '{reviewer}' not found in models.yaml; review artifact is unverifiable")
+              sys.exit(1)
 
           # Load pipeline.yaml to find establish model
           with open('TOF/pipeline.yaml') as f:

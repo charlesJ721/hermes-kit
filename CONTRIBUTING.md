@@ -26,4 +26,8 @@ The REVIEW.md must:
 2. Contain valid YAML frontmatter with `review.verdict` and `tof.reviewer` fields
 3. Be produced by a model whose family differs from the establish phase model (CI enforces this)
 
+### Reading triage-stats
+
+The `single-review / review-only-advice` ratio shown by `tof triage-stats` measures **explicit compliance** within TOF — how often the orchestrator followed a `review-only` triage recommendation by actually dispatching `tof run --only review`. It does **not** include implicit self-execution where the orchestrator handled the task in-chat without invoking `tof run` at all. That gap requires external observation (e.g., todo → ledger correlation).
+
 See TOF/CORE_CONCEPTS.md for the full trust-chain architecture.
